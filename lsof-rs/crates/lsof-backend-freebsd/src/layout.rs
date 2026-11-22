@@ -21,6 +21,10 @@
 pub const CTL_KERN: i32 = 1;
 pub const KERN_PROC: i32 = 14;
 pub const KERN_PROC_PROC: i32 = 8;
+/// `KERN_PROC_ALL`: every process, a record for each of its threads (the
+/// kernel leaves `KERN_PROC_NOTHREADS` unset for this one number,
+/// `kern_proc.c`). What the C reads under `-K` (`dproc.c:390`).
+pub const KERN_PROC_ALL: i32 = 0;
 pub const KERN_PROC_FILEDESC: i32 = 33;
 pub const KERN_LOCKF: i32 = 39;
 pub const KERN_FILE: i32 = 15;
@@ -43,6 +47,12 @@ pub struct ProcLayout {
     pub stat: usize,
     /// `ki_comm[COMMLEN + 1]`.
     pub comm: usize,
+    /// `ki_tid`, a `lwpid_t` (`int32_t`): the thread a record is of, which
+    /// the C keeps under `-K` (`dproc.c:443`). Measured as the rest, from
+    /// FreeBSD 14.5's headers alone (`cc -target x86_64-…` and `i386-…` on a
+    /// 14.5 host, each `offsetof()` read off the object file); `kinfo_proc`
+    /// is the same size in 15, where it was not measured again.
+    pub tid: usize,
 }
 
 /// amd64: 1088 bytes.
@@ -54,6 +64,7 @@ pub const PROC_AMD64: ProcLayout = ProcLayout {
     uid: 168,
     stat: 388,
     comm: 447,
+    tid: 600,
 };
 
 /// i386: 768 bytes.
@@ -65,6 +76,7 @@ pub const PROC_I386: ProcLayout = ProcLayout {
     uid: 136,
     stat: 308,
     comm: 367,
+    tid: 520,
 };
 
 /// The layout of the architecture this binary was built for. Anything but

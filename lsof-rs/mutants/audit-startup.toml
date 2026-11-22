@@ -3,8 +3,12 @@
 # closed 0, 1 or 2, and a silent exit 1 without it), 172 (`+m m` asked of
 # access(2) first), 173 (the -d mixture's item cut at 254 bytes), 174 (a
 # letter of several bytes a line a byte) and 175 (no /proc: the mount
-# table's line, not `can't fork`). One per rule, bound and branch the fixes
-# added, each a plausible way to get it wrong. The kill table is this file,
+# table's line, not `can't fork`); and, after the two reviews of that work,
+# 123 (the helper's /dev/null read and write), 175 (a mount table that is a
+# FIFO or a device is not waited on or read), 177 (the C's offset probe and
+# its two warnings), 170's sweep past a lowered limit, and the rules the
+# parity review found without a mutant. One per rule, bound and branch the
+# fixes added, each a plausible way to get it wrong. The kill table is this file,
 # run (porting-kit LESSONS #083):
 #
 #   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/audit-startup.toml
@@ -18,12 +22,15 @@
 #
 # Run 2026-11-21 as root, --first-kill: 48 mutants, 48 killed (unit-sigpipe
 # 23, unit-cli 12, startup 10, unit-linux 3; the gates run in that order,
-# so the backend's unit tests are asked last).
+# so the backend's unit tests are asked last). After the reviews: 78
+# mutants, 78 killed (unit-sigpipe 26, unit-cli 19, startup 27, unit-linux
+# 6; one, `no-sweep-fallback`, run again alone once its edit built). The `startup` gate runs whole-host lsof (`-i`,
+# `-c`): run the table under the gates' lock, beside no FUSE fixture.
 #
 # The differential sees the rules too, and is no gate here for its cost:
-# of its 29 cases about them (`startup-*`, `plus-m-file-the-*-user-may-not-
-# read`, `fd-mixture-*`, `letters-multibyte-*`), 28 DIVERGE on the tree
-# before the fixes (measured 2026-11-21).
+# of its 29 matching cases about them (`startup-*`, `plus-m-file-the-*-user-
+# may-not-read`, `fd-mixture-*`, `letters-multibyte-*`), 27 DIVERGE on the
+# tree before the fixes and two match there too (measured 2026-11-21).
 #
 # Rules with no mutant here, and why:
 # * `O_LARGEFILE` on the constructor's `/dev/null`: 0 on every 64-bit glibc
@@ -41,6 +48,12 @@
 #   pipes-alone` drops the two that are `fork()`'s own.
 # * An open that fails past access() being `can't open`, whatever its
 #   error: plus4.toml's `socket-says-access`, re-anchored on this code.
+# * `sel.file_struct = false` where no offset can be told: on Linux the
+#   selection's flag only asks FreeBSD's backend to read `kern.file`, so
+#   nothing a Linux gate sees changes without it (the columns, `-F` and
+#   JSON are `probe-*` and `disregard-*` above).
+# * The probe's 4 KiB bound on its `fdinfo` read: procfs writes some sixty
+#   bytes there, and a longer file is no procfs's.
 # * A directory entry that says it has no length ending the reading: a
 #   mutant without the check reads on, to no effect, for as many turns as
 #   there are bytes (the loop is bounded by them), and ends the same.
@@ -146,27 +159,47 @@ new = '''        if sys.close_from(low) {'''
 
 [[mutant]]
 name = "no-sweep-fallback"
-rule = "with neither, every number below the limit is closed (170)"
+rule = "with neither, every number from 3 up to 1,048,576 is closed (170)"
 [[mutant.edit]]
 file = "crates/lsof-sigpipe/src/lib.rs"
-old = '''        for fd in low..sweep_end(sys.table_size()) {'''
-new = '''        for fd in low..low.min(sweep_end(sys.table_size())) {'''
+old = '''        sweep(sys, low, SWEEP_MAX);'''
+new = '''        let _ = (&sys, low);'''
 
 [[mutant]]
-name = "sweep-stops-at-a-low-limit"
-rule = "the sweep runs to 53 at least, the C's MaxFd (170)"
+name = "sweep-stops-at-the-soft-limit"
+rule = "the sweep runs past a lowered soft limit, whatever it is (170; the review's LOW-3)"
 [[mutant.edit]]
 file = "crates/lsof-sigpipe/src/lib.rs"
-old = '''        table_size.clamp(SWEEP_MIN, SWEEP_MAX)'''
-new = '''        table_size.clamp(FIRST_CLOSED, SWEEP_MAX)'''
+old = '''        sweep(sys, low, SWEEP_MAX);'''
+new = '''        sweep(sys, low, 1024);'''
 
 [[mutant]]
-name = "sweep-unbounded"
-rule = "the sweep closes 1,048,576 numbers at most (170)"
+name = "sweep-bound-raised"
+rule = "the sweep closes the numbers below 1,048,576 and no more (170)"
 [[mutant.edit]]
 file = "crates/lsof-sigpipe/src/lib.rs"
-old = '''        table_size.clamp(SWEEP_MIN, SWEEP_MAX)'''
-new = '''        table_size.max(SWEEP_MIN)'''
+old = '''    pub(crate) const SWEEP_MAX: c_int = 1 << 20;'''
+new = '''    pub(crate) const SWEEP_MAX: c_int = 1 << 21;'''
+
+[[mutant]]
+name = "sweep-skips-its-first"
+rule = "the sweep closes every number from its first, open or not (170)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''        for fd in low..end {
+            sys.close(fd);
+        }'''
+new = '''        for fd in low + 1..end {
+            sys.close(fd);
+        }'''
+
+[[mutant]]
+name = "close-range-cloexec"
+rule = "close_range() closes, with no flag: CLOSE_RANGE_CLOEXEC leaves every descriptor open in lsof (170; the parity review's 6)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            let (last, flags): (libc::c_uint, libc::c_uint) = (libc::c_uint::MAX, 0);'''
+new = '''            let (last, flags): (libc::c_uint, libc::c_uint) = (libc::c_uint::MAX, 4);'''
 
 [[mutant]]
 name = "listing-closes-below-three"
@@ -258,6 +291,27 @@ old = '''        if name.is_empty() {
         }
         let mut fd: c_int = 0;'''
 new = '''        let mut fd: c_int = 0;'''
+
+[[mutant]]
+name = "dirent-name-not-cut-at-nul"
+rule = "an entry's name ends at its NUL, before the record's padding (170; the parity review's 6)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            let name = name.split(|&b| b == 0).next().unwrap_or_default();
+'''
+new = ''''''
+
+[[mutant]]
+name = "fd-name-overflow-wraps"
+rule = "a name past what an int holds is no descriptor (170; the parity review's 6)"
+[[mutant.edit]]
+file = "crates/lsof-sigpipe/src/lib.rs"
+old = '''            fd = fd
+                .checked_mul(10)?
+                .checked_add(c_int::from(b.wrapping_sub(b'0')))?;'''
+new = '''            fd = fd
+                .wrapping_mul(10)
+                .wrapping_add(c_int::from(b.wrapping_sub(b'0')));'''
 
 [[mutant]]
 name = "fd-name-int-max-taken"
@@ -392,6 +446,14 @@ old = '''                    bytes.truncate(FD_MIXTURE_ITEM);'''
 new = ''''''
 
 [[mutant]]
+name = "fd-mixture-range-without-its-end"
+rule = "a range in the mixture is quoted as the C formats it, `^lo-hi` (173; the parity review's 6)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = '''                Some((lo, hi)) => format!("{caret}{lo}-{hi}"),'''
+new = '''                Some((lo, _)) => format!("{caret}{lo}"),'''
+
+[[mutant]]
 name = "fd-mixture-item-255"
 rule = "254 bytes, as snpf(buf, 255) keeps (173)"
 [[mutant.edit]]
@@ -524,3 +586,248 @@ rule = "EAGAIN and ENOMEM are a fork()'s own, as EMFILE and ENFILE are the pipes
 file = "crates/lsof-backend-linux/src/safefs.rs"
 old = '''    matches!(e.raw_os_error(), Some(11 | 12 | 23 | 24))'''
 new = '''    matches!(e.raw_os_error(), Some(23 | 24))'''
+
+[[mutant]]
+name = "unopenable-asks-another-table"
+rule = "where no helper can start, the table asked is /proc/mounts, the C's (175; the parity review's 6)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = """    open_table(Path::new(PROC_MOUNTS)).err()"""
+new = """    open_table(Path::new("/proc/self/mounts")).err()"""
+
+# ------------------------------- round 2: what the two reviews found (2026-11-21)
+
+[[mutant]]
+name = "helper-stderr-write-only"
+rule = "the helper's 2 is /dev/null opened read and write, which never waits on a FIFO (123; the parity review's 1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = """        .stderr(dev_null()?);"""
+new = """        .stderr(Stdio::null());"""
+
+[[mutant]]
+name = "helper-dev-null-not-read"
+rule = "...for reading too (123)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = """    let null = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")"""
+new = """    let null = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")"""
+
+[[mutant]]
+name = "table-open-waits"
+rule = "the mount table is opened without waiting (175; the safety review's LOW-1)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/text.rs"
+old = """        .custom_flags(nonblocking)"""
+new = """        .custom_flags(nonblocking & 0)"""
+
+[[mutant]]
+name = "table-fifo-read"
+rule = "a FIFO in the table's place is refused, not read as an empty table (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/text.rs"
+old = """    if file.metadata()?.file_type().is_fifo() {"""
+new = """    if file.metadata()?.file_type().is_fifo() && false {"""
+
+[[mutant]]
+name = "table-fifo-errno"
+rule = "...in the C's words for a table it cannot open, ENXIO (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/text.rs"
+old = """pub const ENXIO: i32 = 6;"""
+new = """pub const ENXIO: i32 = 2;"""
+
+[[mutant]]
+name = "table-device-read"
+rule = "a device in the table's place is no table unless it is empty (175; the C's reader grows without bound)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = """    if device && !matches!(file.read(&mut [0u8; 1]), Ok(0)) {"""
+new = """    if device && false {"""
+
+[[mutant]]
+name = "table-device-any-taken"
+rule = "...one with a byte to give is refused (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = """    if device && !matches!(file.read(&mut [0u8; 1]), Ok(0)) {"""
+new = """    if device && !matches!(file.read(&mut [0u8; 1]), Ok(_)) {"""
+
+[[mutant]]
+name = "table-empty-device-refused"
+rule = "...and /dev/null, a masked table, is the empty one the C reads (175)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/mounts.rs"
+old = """    if device && !matches!(file.read(&mut [0u8; 1]), Ok(0)) {"""
+new = """    if device {"""
+
+[[mutant]]
+name = "probe-not-made"
+rule = "the C's probe of its own fdinfo is made, and where it fails -o and +f are disregarded (177)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/backend.rs"
+old = """        crate::offtype::known()"""
+new = """        true"""
+
+[[mutant]]
+name = "probe-asks-its-pid"
+rule = "the probe asks /proc/self/fdinfo, which names lsof in a pid namespace with the outer /proc, where the C's /proc/PID does not (177)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/offtype.rs"
+old = """    probe(Path::new(TEST_FILE), Path::new(OWN_FDINFO))"""
+new = """    probe(
+        Path::new(TEST_FILE),
+        &Path::new("/proc")
+            .join(std::process::id().to_string())
+            .join("fdinfo"),
+    )"""
+
+[[mutant]]
+name = "probe-seeks-nowhere"
+rule = "the probe seeks to 1, and asks for that position (177)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/offtype.rs"
+old = """const TEST_SEEK: u64 = 1;"""
+new = """const TEST_SEEK: u64 = 0;"""
+
+[[mutant]]
+name = "probe-any-position"
+rule = "the position told must be the one sought (177)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/offtype.rs"
+old = """    crate::files::parse_fdinfo(text, crate::files::want::POS).pos == Some(TEST_SEEK)"""
+new = """    crate::files::parse_fdinfo(text, crate::files::want::POS).pos.is_some()"""
+
+[[mutant]]
+name = "probe-fdinfo-waits"
+rule = "the probe's fdinfo is opened without waiting (177)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/offtype.rs"
+old = """    let file = crate::text::open_unwaiting(path).ok()?;"""
+new = """    let file = std::fs::File::open(path).ok()?;"""
+
+[[mutant]]
+name = "probe-after-the-table"
+rule = "the offset warning is said before the mount table is read, where the C's initialize() says it (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = """        if !offsets_known && columns.disregard_offset(warns) {
+            say!("lsof: {}", lsof_cli::args::NO_OFFSET);
+        }
+        if table.is_none() && needs_table {
+            table = Some(read_table(&sel));
+        }"""
+new = """        if table.is_none() && needs_table {
+            table = Some(read_table(&sel));
+        }
+        if !offsets_known && columns.disregard_offset(warns) {
+            say!("lsof: {}", lsof_cli::args::NO_OFFSET);
+        }"""
+
+[[mutant]]
+name = "probe-flags-before-the-table"
+rule = "the flags warning is said once the table is read, back in main() (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = """        if !offsets_known && columns.disregard_offset(warns) {
+            say!("lsof: {}", lsof_cli::args::NO_OFFSET);
+        }
+        if table.is_none() && needs_table {"""
+new = """        if !offsets_known && columns.disregard_offset(warns) {
+            say!("lsof: {}", lsof_cli::args::NO_OFFSET);
+        }
+        if !offsets_known && columns.disregard_flags(sel.file_struct, warns) {
+            say!("lsof: {}", lsof_cli::args::NO_FILE_FLAGS);
+        }
+        if table.is_none() && needs_table {"""
+
+[[mutant]]
+name = "probe-warns-under-dash-w"
+rule = "-w and -t mute both warnings (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = """        let warns = !sel.omit_unreadable;"""
+new = """        let warns = true;"""
+
+[[mutant]]
+name = "probe-offsets-kept-in-rows"
+rule = "where no offset can be told no row has one: -F prints no o (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = """                f.offset = None;"""
+new = """                let _ = &f.offset;"""
+
+[[mutant]]
+name = "probe-json-flags-kept"
+rule = "...and JSON has no flags (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = """                j.file_flags = lsof_core::render::FileFlags::Off;"""
+new = """                let _ = &j.file_flags;"""
+
+[[mutant]]
+name = "disregard-offset-no-sizes"
+rule = "Fsize = 1: the column is the size's (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = """        self.fields_offset = false;
+        self.size = true;"""
+new = """        self.fields_offset = false;"""
+
+[[mutant]]
+name = "disregard-offset-field-not-asked"
+rule = "-F with o asks for offsets as -o does (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = """        let asked = self.offset || self.fields_offset;"""
+new = """        let asked = self.offset;"""
+
+[[mutant]]
+name = "disregard-flags-without-plus-f"
+rule = "the flags warning is +f's: FsvByf (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = """        selected && self.flags_by_f && warns"""
+new = """        selected && warns"""
+
+[[mutant]]
+name = "disregard-flags-not-dropped"
+rule = "Fsv = 0: no FILE-FLAG column (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = """        self.file_flags = FileFlags::Off;
+        self.file_struct = FsValues::default();
+        selected"""
+new = """        self.file_struct = FsValues::default();
+        selected"""
+
+[[mutant]]
+name = "flags-by-f-forgotten"
+rule = "FsvByf is set by +f g and never cleared (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = """                                        flags_hex = c == 'G';
+                                        flags_by_f |= plus;"""
+new = """                                        flags_hex = c == 'G';
+                                        flags_by_f = plus;"""
+
+[[mutant]]
+name = "flags-by-f-not-kept"
+rule = "...and it reaches the columns (177)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = """    columns.flags_by_f = flags_by_f;"""
+new = """    columns.flags_by_f = flags_by_f && false;"""
+
+[[mutant]]
+name = "helper-null-not-moved-up"
+rule = "the helper's /dev/null is moved out of the pipes' way, so lsof keeps its ends at the C's numbers (123, 166)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/safefs.rs"
+old = """    Ok(match rustix::io::fcntl_dupfd_cloexec(&null, NULL_ABOVE) {"""
+new = """    Ok(match rustix::io::fcntl_dupfd_cloexec(&null, 0) {"""

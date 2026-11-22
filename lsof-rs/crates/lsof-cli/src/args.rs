@@ -60,6 +60,10 @@ pub struct Reports {
     pub field_help: bool,
     /// `-v`.
     pub version: bool,
+    /// `-D ?` (FreeBSD): the C's report of its device cache file's paths,
+    /// which `usage()` prints after the field letters and before the
+    /// version (`DChelp`, `usage.c:859-860`), and ends the run as `-h` does.
+    pub device_cache: bool,
 }
 
 impl Reports {
@@ -68,23 +72,80 @@ impl Reports {
         help: true,
         field_help: false,
         version: false,
+        device_cache: false,
     };
     /// `-F ?` alone.
     pub const FIELD_HELP: Reports = Reports {
         help: false,
         field_help: true,
         version: false,
+        device_cache: false,
     };
     /// `-v` alone.
     pub const VERSION: Reports = Reports {
         help: false,
         field_help: false,
         version: true,
+        device_cache: false,
     };
 
     /// Whether any was asked for.
     pub fn any(&self) -> bool {
-        self.help || self.field_help || self.version
+        self.help || self.field_help || self.version || self.device_cache
+    }
+}
+
+/// What `-D ?` reports of a build that keeps no device cache, in the words
+/// the C's `report_HASDCACHE()` has for a path list with nothing in it
+/// (`usage.c:117-119`, `:149-151`): no file is read, and none is written
+/// (DIVERGENCES 148).
+pub const DEVICE_CACHE_REPORT: &str = "Device cache file read-only paths:
+    none
+Device cache file write paths:
+    none
+";
+
+/// What a `-D` value asks of the C's device cache (`ctrl_dcache()`,
+/// `arg.c:483-565`): `?`, `i`, `b`, `r` or `u`, the last three with a path
+/// after them. lsof-rs keeps no cache, so each but `?` is read, checked and
+/// then does nothing: `/dev` is read on every run, as under the C's `-D i`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceCache {
+    /// `?`: report the cache file's paths, and list nothing.
+    Report,
+    /// `i`: ignore the cache. What lsof-rs always does.
+    Ignore,
+    /// `b[path]`: the C builds the cache file anew. Nothing is written.
+    Build,
+    /// `r[path]`: the C reads the cache file and writes none. Nothing is
+    /// read.
+    Read,
+    /// `u[path]`: the C reads the cache file and rebuilds it when it must
+    /// (its default). Nothing is read or written.
+    Update,
+}
+
+/// A `-D` value as `ctrl_dcache()` reads it, or the C's line for one it
+/// refuses (measured on FreeBSD 14.5): no value, `no device cache option
+/// control string`; `?` with anything after it, `nothing should follow -D?`;
+/// `i` (either case) alone; `b`, `r`, `u` (either case) and whatever follows,
+/// which the C takes for the file's path after the blanks and tabs before
+/// it; anything else, `unknown -D option: ` and the value as it stands. The
+/// C refuses `b` and `u`, and `r` with a path, to a setuid-root lsof (`-D
+/// option restricted to root`): lsof-rs is not installed so, and reads and
+/// writes no file here, so it does not ask.
+pub fn device_cache(value: Option<&[u8]>) -> Result<DeviceCache, String> {
+    let Some(value) = value else {
+        return Err("no device cache option control string".to_string());
+    };
+    match (value.first(), value.len()) {
+        (Some(b'?'), 1) => Ok(DeviceCache::Report),
+        (Some(b'?'), _) => Err("nothing should follow -D?".to_string()),
+        (Some(b'i' | b'I'), 1) => Ok(DeviceCache::Ignore),
+        (Some(b'b' | b'B'), _) => Ok(DeviceCache::Build),
+        (Some(b'r' | b'R'), _) => Ok(DeviceCache::Read),
+        (Some(b'u' | b'U'), _) => Ok(DeviceCache::Update),
+        _ => Err(format!("unknown -D option: {}", shown_bytes(value))),
     }
 }
 
@@ -231,6 +292,14 @@ pub struct Columns {
     /// count and node address, in their columns and in `-F`'s `F`, `C` and
     /// `N` fields (DIVERGENCES 142).
     pub file_struct: FsValues,
+    /// `-F` with the letter `o`: the C's `Foffset` set without `-o`'s
+    /// column, which collides with `-s` as `-o` does and is disregarded
+    /// with it where no offset can be told (DIVERGENCES 177).
+    pub fields_offset: bool,
+    /// `+f` with a letter it knows: the C's `FsvByf`, which nothing clears,
+    /// and without which nothing is said when the file-structure selections
+    /// are dropped (DIVERGENCES 177).
+    pub flags_by_f: bool,
 }
 
 impl Default for Columns {
@@ -244,7 +313,44 @@ impl Default for Columns {
             nlink: false,
             file_flags: FileFlags::Off,
             file_struct: FsValues::default(),
+            fields_offset: false,
+            flags_by_f: false,
         }
+    }
+}
+
+/// What the C says where it cannot tell a file's offset and `-o` asked for
+/// it (`dproc.c:658-661`), and where `+f` asked for what it reads from the
+/// same place (`main.c:1281-1284`), after `lsof: `.
+pub const NO_OFFSET: &str = "WARNING: can't report offset; disregarding -o.";
+pub const NO_FILE_FLAGS: &str = "WARNING: can't report file flags; disregarding +f.";
+
+impl Columns {
+    /// The C's first step where its probe could not tell a file's offset
+    /// (`OffType` is `OFFSET_UNKNOWN`; `initialize()`, `dproc.c:657-664`),
+    /// taken before it reads the mount table: `Foffset = 0; Fsize = 1`, so
+    /// the column is the size's and headed `SIZE`, after [`NO_OFFSET`]
+    /// where offsets were asked for (`-o`, or `-F` with `o`) and warnings
+    /// are not off (`warns`: neither `-w` nor `-t`). Whether the line is to
+    /// be said. An `-o` with digits asks for no offset, and says nothing.
+    pub fn disregard_offset(&mut self, warns: bool) -> bool {
+        let asked = self.offset || self.fields_offset;
+        self.offset = false;
+        self.fields_offset = false;
+        self.size = true;
+        asked && warns
+    }
+
+    /// The second step (`main.c:1279-1286`), taken once the table is read:
+    /// `Fsv = 0`, every file-structure selection off, after
+    /// [`NO_FILE_FLAGS`] where one is still set (`selected`, the C's
+    /// `Fsv`), a `+f` gave one at some point (`FsvByf`: `-F`'s `G` alone
+    /// says nothing) and warnings are not off. Whether the line is to be
+    /// said.
+    pub fn disregard_flags(&mut self, selected: bool, warns: bool) -> bool {
+        self.file_flags = FileFlags::Off;
+        self.file_struct = FsValues::default();
+        selected && self.flags_by_f && warns
     }
 }
 
@@ -1034,6 +1140,8 @@ fn parse_options<'s>(
     // read.
     let mut flags_shown = false;
     let mut flags_hex = false;
+    // The C's `FsvByf`: a `+f` gave a letter it knows, at any point.
+    let mut flags_by_f = false;
     // The C's other `Fsv` bits, `FSV_FA`, `FSV_CT` and `FSV_NI`, set and
     // cleared the same way: by `+f`/`-f`'s `f`, `c` and `n`, and set by
     // `-F` where it selects `F`, `C` or `N`.
@@ -1547,9 +1655,16 @@ fn parse_options<'s>(
                 // either prefix, so `-X -X` is off again and `-X -X -i` is
                 // no conflict (DIVERGENCES 45): the C judges `-i` against
                 // the value every `-X` leaves.
-                'X' => sel.skip_inet_tables = !sel.skip_inet_tables,
+                'X' if !freebsd_options() => sel.skip_inet_tables = !sel.skip_inet_tables,
                 'N' => sel.nfs_only = true,
-                'Z' => {
+                // `+M`, `-M`: whether the C asks the portmapper for the
+                // programs registered on a port it names (`FportMap`; `-M`
+                // is its default). FreeBSD's C has the pair (`[+|-M]`) and
+                // Linux's does not. lsof-rs asks no portmapper, and on
+                // FreeBSD names no port either: both are read, and change
+                // nothing (DIVERGENCES 183).
+                'M' if freebsd_options() => {}
+                'Z' if !freebsd_options() => {
                     if (host.selinux_enabled)() {
                         // `-Z [context]`. The value is attached or the next
                         // word, and a word that opens an option is not one —
@@ -1576,7 +1691,7 @@ fn parse_options<'s>(
                     j = chars.len();
                     continue;
                 }
-                'e' => {
+                'e' if !freebsd_options() => {
                     // `-e s` / `+e s`. The value may be attached or the next
                     // word, and the C takes that word WHATEVER it is — a
                     // missing value is reported by quoting what it found:
@@ -1629,7 +1744,7 @@ fn parse_options<'s>(
                 'U' => sel.unix_only = true,
                 // `+E` also lists the peers' own files. `-E` after `+E` must
                 // not downgrade that — lsof treats +E as a superset of -E.
-                'E' => {
+                'E' if !freebsd_options() => {
                     if plus {
                         sel.endpoints = Some(EndpointMode::Files);
                     } else if sel.endpoints != Some(EndpointMode::Files) {
@@ -1673,12 +1788,22 @@ fn parse_options<'s>(
                                     'g' | 'G' if HAS_FILE_FLAGS => {
                                         flags_shown = plus;
                                         flags_hex = c == 'G';
+                                        flags_by_f |= plus;
                                     }
                                     // FreeBSD's, as its C has them
                                     // (`main.c:412-458`, no `HASNOFS*`).
-                                    'c' | 'C' if has_file_struct() => fsv.count = plus,
-                                    'f' | 'F' if has_file_struct() => fsv.addr = plus,
-                                    'n' | 'N' if has_file_struct() => fsv.node = plus,
+                                    'c' | 'C' if has_file_struct() => {
+                                        fsv.count = plus;
+                                        flags_by_f |= plus;
+                                    }
+                                    'f' | 'F' if has_file_struct() => {
+                                        fsv.addr = plus;
+                                        flags_by_f |= plus;
+                                    }
+                                    'n' | 'N' if has_file_struct() => {
+                                        fsv.node = plus;
+                                        flags_by_f |= plus;
+                                    }
                                     // Each one the C's error, and it reads on.
                                     other => early.letters(Early::FILE_STRUCT, other),
                                 }
@@ -1967,21 +2092,50 @@ fn parse_options<'s>(
                 // `unsupported option` (DIVERGENCES 148).
                 // `--` is no value to `GetOpt` here either, as for `-Z`:
                 // `-D -- -W` is `-D`'s line alone, `-W` a name (measured).
+                // FreeBSD's `-D` is the C's device cache control
+                // (`HASDCACHE`), read as `ctrl_dcache()` reads it and then
+                // without effect: lsof-rs keeps no cache (DIVERGENCES 148).
+                // The value is `GetOpt`'s, the rest of the word or else the
+                // next word whatever it opens with (measured: `-D -p 1` is
+                // `unknown -D option: -p`).
+                'D' if !plus && freebsd_options() => {
+                    let value = path_value(&chars, j, letters_ok, &raw, &mut i);
+                    took_bytes = true;
+                    match device_cache(value.as_deref().map(std::ffi::OsStr::as_encoded_bytes)) {
+                        Ok(DeviceCache::Report) => reports.device_cache = true,
+                        Ok(_) => {}
+                        Err(line) => early.line(&line),
+                    }
+                    j = chars.len();
+                    continue;
+                }
+                // FreeBSD's C has `-k` (`HASKOPT`) and `-m` (`HASMOPT`), and
+                // gives back a value that opens with `-` or `+`, or none, as
+                // `-K` does: `if (!GOv || *GOv == '-' || *GOv == '+')` says
+                // `-k not followed by path` (or `-m …`) and reads that word
+                // again as options (`main.c:600-610`, `:676-686`; `-k`
+                // whatever its prefix, and its line says `-k`). Measured on
+                // FreeBSD 14.5: `-k -W` is that line and `illegal option
+                // character: W`, `-k -p` that line and `no process ID
+                // specified`. A path is lsof-rs's `unsupported option`, as
+                // before (DIVERGENCES 148, 149).
+                'k' | 'm' if cfg!(target_os = "freebsd") && (c == 'k' || !plus) => {
+                    match optional_value(&chars, j, &args, &mut i) {
+                        None => early.line(&format!("-{c} not followed by path")),
+                        Some(_) => {
+                            early.line(&format!("unsupported option: {prefix}{c}"));
+                            took_bytes = true;
+                        }
+                    }
+                    j = past_value(&chars, j);
+                    continue;
+                }
                 'D' | 'm' if !plus => {
                     if c == 'm' && !cfg!(target_os = "freebsd") {
                         early.line("-m not supported");
                     } else {
                         early.line(&format!("unsupported option: -{c}"));
                     }
-                    if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
-                        i += 1;
-                        took_bytes = true;
-                    }
-                    j = chars.len();
-                    continue;
-                }
-                'k' if cfg!(target_os = "freebsd") => {
-                    early.line(&format!("unsupported option: {prefix}k"));
                     if j + 1 == chars.len() && args.get(i + 1).is_some_and(|w| w != "--") {
                         i += 1;
                         took_bytes = true;
@@ -2085,6 +2239,8 @@ fn parse_options<'s>(
         (true, true) => FileFlags::Hex,
     };
     columns.file_struct = fsv;
+    columns.fields_offset = fields_offset;
+    columns.flags_by_f = flags_by_f;
     // Checked after the loop because the two may come in either order. `-o 5`
     // is only a digit limit and does not count; `-Fo` does (see above).
     if (columns.offset || fields_offset) && columns.size {
@@ -3190,6 +3346,31 @@ thread_local! {
         const { std::cell::Cell::new(cfg!(target_os = "freebsd")) };
 }
 
+/// Whether the options are those of FreeBSD's C (measured on 14.5, the
+/// autotools build): `-D` is its device cache control, `+M` and `-M` its
+/// portmapper switch, `-s` knows no `UDP:` protocol, and `-e`, `-E`, `-X`
+/// and `-Z`, which its `GetOpt` string lacks, are illegal option characters
+/// (DIVERGENCES 148, 183).
+#[cfg(not(test))]
+fn freebsd_options() -> bool {
+    cfg!(target_os = "freebsd")
+}
+
+/// [`freebsd_options`] in a test: off on every host, FreeBSD too, unless the
+/// test turns it on ([`FREEBSD_OPTIONS`]), so that a test of `-e`, `-E`,
+/// `-X` or `-Z` reads the C that has the option wherever it runs, and the
+/// tests of FreeBSD's set run on every host.
+#[cfg(test)]
+fn freebsd_options() -> bool {
+    FREEBSD_OPTIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread's parses read the options as FreeBSD's C does.
+    static FREEBSD_OPTIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Whether `--etw`, `--unicode` and `--ascii` are lsof-rs's own options:
 /// on Windows alone, where there is no C to match (DIVERGENCES 155).
 #[cfg(not(test))]
@@ -3624,7 +3805,10 @@ fn parse_state_spec(filter: &mut StateFilter, value: &str, early: &mut Early) {
     let lower = value.get(..4).map(str::to_ascii_lowercase);
     let proto = match lower.as_deref() {
         Some("tcp:") => "TCP",
-        Some("udp:") => "UDP",
+        // FreeBSD's C knows TCP alone (`USE_LIB_PRINT_TCPTPI`,
+        // `arg.c:1750-1756`): measured, `-s UDP:Idle` is its `unknown -s
+        // protocol: "UDP:Idle"`.
+        Some("udp:") if !freebsd_options() => "UDP",
         _ => return early.line(&format!("unknown -s protocol: \"{}\"", shown(value))),
     };
     let names = value.get(4..).unwrap_or("");
@@ -4295,7 +4479,31 @@ mod tests {
             .expect("a filter");
         assert_eq!(f.include, [Listen, Established]);
         assert_eq!(f.exclude, [TimeWait]);
-        if cfg!(not(windows)) {
+        if cfg!(target_os = "freebsd") {
+            // FreeBSD's names (`tcpstates[]`), each measured against its C
+            // on 14.5: `CLOSED` and `SYN_RCVD`, the two `FIN_WAIT_`s with
+            // their second underscore, and neither of Linux's `CLOSE` and
+            // `SYN_RECV`, nor Windows' `DELETE_TCB`.
+            use lsof_core::TcpState::{Closed, FinWaitOne, FinWaitTwo, SynReceived};
+            assert_eq!(
+                states(&["-sTCP:closed,syn_rcvd"]).unwrap().unwrap().include,
+                [Closed, SynReceived]
+            );
+            assert_eq!(
+                states(&["-sTCP:FIN_WAIT_1,fin_wait_2"])
+                    .unwrap()
+                    .unwrap()
+                    .include,
+                [FinWaitOne, FinWaitTwo]
+            );
+            for name in ["close", "syn_recv", "FIN_WAIT1", "DELETE_TCB"] {
+                assert_eq!(
+                    states(&[&format!("-sTCP:{name}")]).err(),
+                    Some(format!("unknown TCP state name: {name}"))
+                );
+            }
+            let _ = Close;
+        } else if cfg!(not(windows)) {
             // The Linux names, which are not Windows': CLOSE and SYN_RECV.
             assert_eq!(states(&["-sTCP:close"]).unwrap().unwrap().include, [Close]);
             assert_eq!(
@@ -5078,11 +5286,23 @@ mod tests {
         assert!(matches(&["-c", "/abc/ib"], "ABC"));
         assert!(matches(&["-c", "/abc/xi"], "ABC"));
         // Anywhere in the command, unless anchored; the empty expression
-        // matches every command.
+        // matches every command, where glibc reads it (FreeBSD's libc
+        // refuses it: `dash_c_reads_a_regular_expression_as_the_c_reads_it`).
         assert!(matches(&["-c", "/ytho/"], "python3"));
         assert!(!matches(&["-c", "/^ytho/"], "python3"));
-        assert!(matches(&["-c", "//"], "anything"));
-        assert!(matches(&["-c", "//b"], ""));
+        if !cfg!(target_os = "freebsd") {
+            assert!(matches(&["-c", "//"], "anything"));
+            assert!(matches(&["-c", "//b"], ""));
+        }
+        // glibc's GNU operators are FreeBSD's characters (DIVERGENCES 183).
+        let freebsd = cfg!(target_os = "freebsd");
+        assert_eq!(matches(&["-c", r"/t\|s/b"], "thr"), !freebsd);
+        assert!(matches(&["-c", r"/t\|s/b"], "t|s"));
+        assert_eq!(matches(&["-c", r"/^t\+$/b"], "tt"), !freebsd);
+        assert!(matches(&["-c", r"/t\+/b"], "t+"));
+        assert_eq!(matches(&["-c", r"/(t)\1/"], "tt"), !freebsd);
+        assert_eq!(matches(&["-c", r"/(t)\1/"], "t1"), freebsd);
+        assert!(matches(&["-c", r"/\(t\)\1/b"], "tt"));
     }
 
     /// `-c /regex/[bix]` (DIVERGENCES 38), each measured against the C: the
@@ -5096,7 +5316,7 @@ mod tests {
         };
         assert_eq!(regexes(&["-c", "/a.c/"]).len(), 1);
         assert_eq!(regexes(&["-c", "/a.c/"])[0].expression(), b"a.c");
-        assert_eq!(regexes(&["-c/a/", "-c", "/b/i", "-c", "//"]).len(), 3);
+        assert_eq!(regexes(&["-c/a/", "-c", "/b/i", "-c", "/c/b"]).len(), 3);
         // A regular expression is no name, and a name no expression.
         assert!(run(&["-c", "/a.c/"]).0.commands.is_empty());
         assert!(run(&["-c", "a.c"]).0.command_regexes.is_empty());
@@ -5111,6 +5331,70 @@ mod tests {
                 .err()
                 .unwrap_or_default()
         };
+        // `regerror()`'s words: glibc's, or FreeBSD's libc's (DIVERGENCES
+        // 183, each measured there).
+        let fb = cfg!(target_os = "freebsd");
+        let words = |glibc: &'static str, freebsd: &'static str| if fb { freebsd } else { glibc };
+        let bracket = words(
+            "Unmatched [, [^, [:, [., or [=",
+            "brackets ([ ]) not balanced",
+        );
+        let regexp = |value: &str, glibc: &'static str, freebsd: &'static str| {
+            (
+                value.to_string(),
+                format!(
+                    "regexp error: {}: {}",
+                    Escaper::for_host().text(value),
+                    words(glibc, freebsd)
+                ),
+            )
+        };
+        let refused = [
+            regexp(
+                "/a[/",
+                "Invalid regular expression",
+                "brackets ([ ]) not balanced",
+            ),
+            regexp("/[a/", bracket, bracket),
+            regexp("/a(/", r"Unmatched ( or \(", "parentheses not balanced"),
+            regexp(
+                "/*a/",
+                "Invalid preceding regular expression",
+                "repetition-operator operand invalid",
+            ),
+            regexp("/a{1/", r"Unmatched \{", "braces not balanced"),
+            regexp(
+                "/a{2,1}/",
+                r"Invalid content of \{\}",
+                "invalid repetition count(s)",
+            ),
+            regexp(
+                "/a{99999}/",
+                "Regular expression too big",
+                "invalid repetition count(s)",
+            ),
+            regexp(
+                "/[[:foo:]]/",
+                "Invalid character class name",
+                "invalid character class",
+            ),
+            regexp("/[b-a]/", "Invalid range end", "invalid character range"),
+            regexp(
+                "/[[.ab.]]/",
+                "Invalid collation character",
+                "invalid collating element",
+            ),
+            // FreeBSD's alone.
+            regexp("/a**/", "", "repetition-operator operand invalid"),
+            regexp("/a|/", "", "empty (sub)expression"),
+            regexp("//", "", "empty (sub)expression"),
+            regexp(r"/a\w/", "", r"trailing backslash (\)"),
+        ];
+        for (value, want) in refused {
+            if fb || !want.ends_with(": ") {
+                assert_eq!(err(&["-c", &value]), want, "{value}");
+            }
+        }
         for (value, want) in [
             ("/abc", "regexp doesn't end with '/': /abc"),
             ("/", "regexp doesn't end with '/': /"),
@@ -5141,38 +5425,8 @@ mod tests {
             ),
             // A modifier's error comes before the expression is compiled.
             ("/a[/q", "invalid regexp modifier: q"),
-            // `regerror()`'s words, after the argument as typed.
-            ("/a[/", "regexp error: /a[/: Invalid regular expression"),
-            ("/[a/", "regexp error: /[a/: Unmatched [, [^, [:, [., or [="),
-            ("/a(/", r"regexp error: /a(/: Unmatched ( or \("),
-            (
-                "/*a/",
-                "regexp error: /*a/: Invalid preceding regular expression",
-            ),
-            ("/a{1/", r"regexp error: /a{1/: Unmatched \{"),
-            (
-                "/a{2,1}/",
-                r"regexp error: /a{2,1}/: Invalid content of \{\}",
-            ),
-            (
-                "/a{99999}/",
-                "regexp error: /a{99999}/: Regular expression too big",
-            ),
-            (
-                "/[[:foo:]]/",
-                "regexp error: /[[:foo:]]/: Invalid character class name",
-            ),
-            ("/[b-a]/", "regexp error: /[b-a]/: Invalid range end"),
-            (
-                "/[[.ab.]]/",
-                "regexp error: /[[.ab.]]/: Invalid collation character",
-            ),
             // The argument is escaped, as `safestrprt()` escapes it; a
             // modifier too, which the C prints raw (DIVERGENCES 122).
-            (
-                "/\x1b[2J[/",
-                "regexp error: /^[[2J[/: Unmatched [, [^, [:, [., or [=",
-            ),
             ("/a/\x1b", "invalid regexp modifier: ^["),
             (
                 "/a/\u{e9}",
@@ -5181,19 +5435,28 @@ mod tests {
         ] {
             assert_eq!(err(&["-c", value]), want, "{value}");
         }
+        assert_eq!(
+            err(&["-c", "/\x1b[2J[/"]),
+            format!("regexp error: /^[[2J[/: {bracket}")
+        );
         // An argument that holds a backslash, which the host's escaping
         // doubles where a backslash is no path separator (`safestrprt()`).
         let shown = |value: &str| Escaper::for_host().text(value).into_owned();
         assert_eq!(shown(r"a\b"), if cfg!(windows) { r"a\b" } else { r"a\\b" });
+        let paren = words(r"Unmatched ( or \(", "parentheses not balanced");
+        let back = words("Invalid back reference", "invalid backreference number");
         for (value, want) in [
-            (r"/a\(/b", r"Unmatched ( or \("),
-            (r"/a\)/b", r"Unmatched ( or \("),
-            (r"/a\{1/b", r"Unmatched \{"),
-            (r"/\1/", "Invalid back reference"),
-            (r"/a\/", "Trailing backslash"),
+            (r"/a\(/b", paren),
+            (r"/a\)/b", paren),
+            (r"/a\{1/b", words(r"Unmatched \{", "braces not balanced")),
+            (r"/\1/b", back),
+            (
+                r"/a\/",
+                words("Trailing backslash", r"trailing backslash (\)"),
+            ),
             // A back-reference to a group still open, or to none.
-            (r"/(a\1)/", "Invalid back reference"),
-            (r"/\(a\)\2/b", "Invalid back reference"),
+            (r"/\(a\1\)/b", back),
+            (r"/\(a\)\2/b", back),
         ] {
             assert_eq!(
                 err(&["-c", value]),
@@ -5201,19 +5464,32 @@ mod tests {
                 "{value}"
             );
         }
+        // An extended expression's back-reference is glibc's; to FreeBSD's
+        // libc `\1` there is the character `1`.
+        for value in [r"/\1/", r"/(a\1)/"] {
+            let said = err(&["-c", value]);
+            if fb {
+                assert_eq!(said, "", "{value}");
+            } else {
+                assert_eq!(said, format!("regexp error: {}: {back}", shown(value)));
+            }
+        }
         // The parse reads on after each, as after every `-c` error, and
         // what was entered before it stays.
         assert_eq!(
             err(&["-c", "/a/", "-c", "/[/", "-c", "/b/q", "-x", "q"]),
-            "regexp error: /[/: Invalid regular expression\n\
-             lsof: invalid regexp modifier: q\n\
-             lsof: unknown cross-over option: q"
+            format!(
+                "regexp error: /[/: {}\n\
+                 lsof: invalid regexp modifier: q\n\
+                 lsof: unknown cross-over option: q",
+                words("Invalid regular expression", "brackets ([ ]) not balanced")
+            )
         );
     }
 
     /// `-c /regex/` as bytes: an expression need not be UTF-8, and a byte of
     /// it that is no character is shown `\xNN` (measured).
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "freebsd")))]
     #[test]
     fn dash_c_reads_a_regular_expression_that_is_not_utf8() {
         use std::os::unix::ffi::OsStringExt;
@@ -5230,6 +5506,29 @@ mod tests {
         assert_eq!(
             parse(vec![os(b"-c"), os(b"/\xffa[/")]).unwrap_err(),
             "regexp error: /\\xffa[/: Invalid regular expression"
+        );
+    }
+
+    /// The same on FreeBSD, whose libc reads the expression by the
+    /// locale's characters (UTF-8): a byte that is none is `illegal byte
+    /// sequence`, wherever it is (DIVERGENCES 183, measured).
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn dash_c_refuses_a_byte_that_is_no_character_on_freebsd() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        for (value, shown) in [
+            (&b"/bad\xffbyte/"[..], "/bad\\xffbyte/"),
+            (b"/\xffa[/", "/\\xffa[/"),
+        ] {
+            assert_eq!(
+                parse(vec![os(b"-c"), os(value)]).unwrap_err(),
+                format!("regexp error: {shown}: illegal byte sequence")
+            );
+        }
+        assert_eq!(
+            parse(vec![os(b"-c"), os(b"/a/\xff")]).unwrap_err(),
+            "invalid regexp modifier: \\xff"
         );
         assert_eq!(
             parse(vec![os(b"-c"), os(b"/a/\xff")]).unwrap_err(),
@@ -7481,13 +7780,20 @@ mod tests {
             columns(&["+d", &d, "-x", "/tmp"]).unwrap_err(),
             each("unknown cross-over option: ", "/tmp")
         );
+        // FreeBSD's C has the letter `n` (and `c` and `f`), so there
+        // `/dev/null`'s `n` is no error: measured on 14.5, the eight lines.
+        let no_letter = if has_file_struct() {
+            "/dev/ull"
+        } else {
+            "/dev/null"
+        };
         assert_eq!(
             columns(&["-f", "/dev/null"]).unwrap_err(),
-            each("unknown file struct option: ", "/dev/null")
+            each("unknown file struct option: ", no_letter)
         );
         assert_eq!(
             columns(&["+f", "/dev/null"]).unwrap_err(),
-            each("unknown file struct option: ", "/dev/null")
+            each("unknown file struct option: ", no_letter)
         );
         // `g` is the C's file-flags letter (DIVERGENCES 46): `-f g` hides the
         // flags, which is the default, and leaves the path arguments alone.
@@ -7588,6 +7894,328 @@ mod tests {
             columns(&["+fx"]).unwrap_err(),
             "unknown file struct option: x"
         );
+    }
+
+    /// Where the C cannot tell a file's offset it takes two steps
+    /// (`dproc.c:657-664`, then `main.c:1279-1286`; DIVERGENCES 177): `-o`
+    /// is disregarded and sizes are shown, with a warning where offsets
+    /// were asked for; and every `+f` selection is dropped, with a warning
+    /// where a `+f` gave one. Neither is said under `-w` or `-t`. Each rule
+    /// measured on the C with no `/proc`.
+    #[test]
+    fn where_no_offset_can_be_told_dash_o_and_plus_f_are_disregarded() {
+        let cols = |argv: &[&str]| columns(argv).unwrap().0;
+        // What asks for offsets: `-o`, and `-F` with an `o`. Not `-o` with
+        // digits, which is a width, nor a bare `-F`.
+        for (argv, asked) in [
+            (&["-o"][..], true),
+            (&["-o", "-o", "10"], true),
+            (&["-F", "o"], true),
+            (&["-F", "pfo"], true),
+            (&["-o", "10"], false),
+            (&["-F"], false),
+            (&["-F", "pf"], false),
+            (&[], false),
+        ] {
+            let mut c = cols(argv);
+            assert_eq!(c.offset || c.fields_offset, asked, "{argv:?}");
+            assert_eq!(c.disregard_offset(true), asked, "{argv:?}");
+            // `Foffset = 0; Fsize = 1`, whatever was asked.
+            assert!(!c.offset && !c.fields_offset && c.size, "{argv:?}");
+            // `-w` or `-t`: nothing is said, and the same is done.
+            let mut c = cols(argv);
+            assert!(!c.disregard_offset(false), "{argv:?}");
+            assert!(!c.offset && !c.fields_offset && c.size, "{argv:?}");
+        }
+        // Each of the two that asks is enough by itself.
+        let asks = |offset, fields_offset| Columns {
+            offset,
+            fields_offset,
+            ..Columns::default()
+        };
+        assert!(asks(true, false).disregard_offset(true));
+        assert!(asks(false, true).disregard_offset(true));
+        assert!(!asks(false, false).disregard_offset(true));
+        // The flags: said where a selection is still set, a `+f` gave one at
+        // some point (the C's `FsvByf`, which `-f` does not clear and `-F`
+        // does not set) and warnings are on; dropped in every case.
+        let by_f = |flags_by_f| Columns {
+            flags_by_f,
+            file_flags: FileFlags::Names,
+            file_struct: FsValues {
+                addr: true,
+                count: true,
+                node: true,
+            },
+            ..Columns::default()
+        };
+        for (flags_by_f, selected, warns) in [
+            (true, true, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let mut c = by_f(flags_by_f);
+            assert_eq!(
+                c.disregard_flags(selected, warns),
+                flags_by_f && selected && warns,
+                "{flags_by_f} {selected} {warns}"
+            );
+            assert_eq!(
+                (c.file_flags, c.file_struct),
+                (FileFlags::Off, FsValues::default())
+            );
+        }
+        // As the options set them, where the platform records the flags.
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            for (argv, by_f, selected) in [
+                (&["+f", "g"][..], true, true),
+                (&["+f", "G"], true, true),
+                (&["+fg", "-fg"], true, false),
+                (&["-fg"], false, false),
+                (&["-F", "G"], false, true),
+                (&["-F"], false, true),
+                (&["-fg", "-F", "G"], false, true),
+                (&["+fg", "-fg", "-F", "G"], true, true),
+                (&[], false, false),
+            ] {
+                let (mut c, sel) = columns(argv).unwrap();
+                assert_eq!(c.flags_by_f, by_f, "{argv:?}");
+                assert_eq!(sel.file_struct, selected, "{argv:?}");
+                assert_eq!(
+                    c.disregard_flags(sel.file_struct, true),
+                    by_f && selected,
+                    "{argv:?}"
+                );
+            }
+        }
+        assert_eq!(NO_OFFSET, "WARNING: can't report offset; disregarding -o.");
+        assert_eq!(
+            NO_FILE_FLAGS,
+            "WARNING: can't report file flags; disregarding +f."
+        );
+    }
+
+    /// `run` with the options read as FreeBSD's C reads them
+    /// ([`freebsd_options`]), on any host.
+    fn as_freebsd<T>(run: impl FnOnce() -> T) -> T {
+        FREEBSD_OPTIONS.with(|on| on.set(true));
+        let out = run();
+        FREEBSD_OPTIONS.with(|on| on.set(false));
+        out
+    }
+
+    /// A `-D` value as the C's `ctrl_dcache()` reads it, each line and each
+    /// acceptance measured against the C on FreeBSD 14.5 (DIVERGENCES 148).
+    #[test]
+    fn a_device_cache_value_is_read_as_ctrl_dcache_reads_it() {
+        use DeviceCache::{Build, Ignore, Read, Report, Update};
+        for (value, want) in [
+            (&b"?"[..], Report),
+            (b"i", Ignore),
+            (b"I", Ignore),
+            (b"b", Build),
+            (b"B", Build),
+            (b"b/tmp/built", Build),
+            (b"r", Read),
+            (b"R", Read),
+            (b"r/tmp/nosuch", Read),
+            (b"r\t /tmp/x y", Read),
+            (b"r/\xff", Read),
+            (b"u", Update),
+            (b"U", Update),
+            (b"u/tmp/upd", Update),
+        ] {
+            assert_eq!(device_cache(Some(value)), Ok(want), "{value:?}");
+        }
+        for (value, line) in [
+            (None, "no device cache option control string"),
+            (Some(&b"??"[..]), "nothing should follow -D?"),
+            (Some(b"?x"), "nothing should follow -D?"),
+            (Some(b""), "unknown -D option: "),
+            (Some(b"x"), "unknown -D option: x"),
+            (Some(b"ix"), "unknown -D option: ix"),
+            (Some(b"i "), "unknown -D option: i "),
+            (Some(b"-p"), "unknown -D option: -p"),
+            (Some(b"\xff"), "unknown -D option: \\xff"),
+            (Some(b"x\x1b[2J"), "unknown -D option: x^[[2J"),
+        ] {
+            assert_eq!(device_cache(value), Err(line.to_string()), "{value:?}");
+        }
+    }
+
+    /// FreeBSD's `-D` through the parser: the value is the rest of the word
+    /// or the next word whatever it opens with, `--` aside; `i`, `b`, `r`
+    /// and `u` change nothing of the run; `?` is a report that ends it; and
+    /// each refusal is the C's line, read on after (all measured on 14.5).
+    /// Elsewhere `-D` is the Linux C's `unsupported option: -D`.
+    #[test]
+    #[cfg(unix)]
+    fn freebsds_dash_d_is_parsed_and_changes_nothing() {
+        use std::os::unix::ffi::OsStringExt;
+        let os = |b: &[u8]| OsString::from_vec(b.to_vec());
+        assert_eq!(
+            columns(&["-D", "i"]).unwrap_err(),
+            "unsupported option: -D",
+            "not FreeBSD's options"
+        );
+        as_freebsd(|| {
+            // The run as its `Debug` text: every field of the selection
+            // and of the columns.
+            let shape = |argv: &[&str]| format!("{:?}", columns(argv).unwrap());
+            let plain = shape(&["-a", "-p", "1"]);
+            for argv in [
+                &["-D", "i", "-a", "-p", "1"][..],
+                &["-Di", "-a", "-p", "1"],
+                &["-aDi", "-p", "1"],
+                &["-a", "-p", "1", "-D", "I"],
+                &["-D", "r", "-a", "-p", "1"],
+                &["-D", "r\t /tmp/x y", "-a", "-p", "1"],
+                &["-Dr/tmp/nosuch", "-a", "-p", "1"],
+                &["-D", "b", "-a", "-p", "1"],
+                &["-D", "b/tmp/built", "-a", "-p", "1"],
+                &["-D", "u", "-a", "-p", "1"],
+                &["-D", "U", "-D", "i", "-a", "-p", "1"],
+            ] {
+                assert_eq!(shape(argv), plain, "{argv:?}");
+            }
+            // `+D` is still the directory tree.
+            assert_eq!(
+                columns(&["+D"]).unwrap_err(),
+                "+d not followed by a directory path"
+            );
+            for (argv, line) in [
+                (&["-D"][..], "no device cache option control string"),
+                (&["-D", "--"], "no device cache option control string"),
+                (&["-D", "--", "-W"], "no device cache option control string"),
+                (&["-D", "-p", "1"], "unknown -D option: -p"),
+                (&["-D", "x", "-p", "1"], "unknown -D option: x"),
+                (&["-D", "ix"], "unknown -D option: ix"),
+                (&["-D", ""], "unknown -D option: "),
+                (&["-D", "??"], "nothing should follow -D?"),
+                (
+                    &["-D", "x", "-W"],
+                    "unknown -D option: x\nlsof: illegal option character: W",
+                ),
+            ] {
+                assert_eq!(columns(argv).unwrap_err(), line, "{argv:?}");
+            }
+            // A value that is not UTF-8 is a value like any other.
+            for argv in [vec![os(b"-D"), os(b"\xff")], vec![os(b"-D\xff")]] {
+                let (got, _) = parse_reporting(
+                    argv.clone(),
+                    &SafeFs::in_process(),
+                    &no_mounts,
+                    &HostChecks::DEFERRED,
+                );
+                let e = got.unwrap_err();
+                assert!(!e.is_fatal(), "{argv:?}");
+                assert_eq!(e.to_string(), "unknown -D option: \\xff", "{argv:?}");
+            }
+            let (got, _) = parse_reporting(
+                vec![os(b"-Dr/\xff"), os(b"-p"), os(b"1")],
+                &SafeFs::in_process(),
+                &no_mounts,
+                &HostChecks::DEFERRED,
+            );
+            assert!(matches!(got, Ok(Action::Run { .. })), "a path is bytes");
+            // `-D ?`: the report, and nothing listed, whatever else was
+            // asked; after an error it is recorded and the error stands.
+            let reported = |argv: &[&str]| {
+                parse_reporting(
+                    argv.iter().map(|s| s.to_string()).collect(),
+                    &SafeFs::in_process(),
+                    &no_mounts,
+                    &HostChecks::DEFERRED,
+                )
+            };
+            let dc = Reports {
+                device_cache: true,
+                ..Reports::default()
+            };
+            assert!(dc.any());
+            for argv in [&["-D", "?"][..], &["-D?"], &["-D", "?", "-p", "1"]] {
+                let (got, reports) = reported(argv);
+                assert!(matches!(got, Ok(Action::Report(r)) if r == dc), "{argv:?}");
+                assert_eq!(reports, dc, "{argv:?}");
+            }
+            let (got, reports) = reported(&["-D", "?", "-h", "-v"]);
+            let all = Reports {
+                help: true,
+                version: true,
+                ..dc
+            };
+            assert!(matches!(got, Ok(Action::Report(r)) if r == all));
+            assert_eq!(reports, all);
+            let (got, reports) = reported(&["-D", "?", "-W"]);
+            assert_eq!(got.unwrap_err().to_string(), "illegal option character: W");
+            assert_eq!(reports, dc);
+        });
+        assert_eq!(
+            DEVICE_CACHE_REPORT,
+            "Device cache file read-only paths:\n    none\nDevice cache file write paths:\n    none\n"
+        );
+    }
+
+    /// FreeBSD's C has no `-e`, `-E`, `-X` or `-Z` (each `illegal option
+    /// character`, the word after it a name, and the letters after it read
+    /// on), has `+M` and `-M`, which change nothing here, and no `UDP:`
+    /// protocol for `-s`: each measured on 14.5 (DIVERGENCES 183).
+    #[test]
+    fn freebsds_option_letters_are_its_cs() {
+        let ill = |c: &str| format!("illegal option character: {c}");
+        // Elsewhere each is the option it was.
+        assert!(columns(&["-X", "-p", "1"]).unwrap().1.skip_inet_tables);
+        assert!(columns(&["-E", "-p", "1"]).unwrap().1.endpoints.is_some());
+        assert_eq!(columns(&["-M"]).unwrap_err(), ill("M"));
+        assert_eq!(
+            columns(&["-sUDP:"]).unwrap_err(),
+            "no UDP state names in: UDP:"
+        );
+        as_freebsd(|| {
+            for (argv, line) in [
+                (&["-e", "/tmp"][..], ill("e")),
+                (&["+e", "/tmp"], ill("e")),
+                (&["-E"], ill("E")),
+                (&["+E"], ill("E")),
+                (&["-X"], ill("X")),
+                (&["-Z"], ill("Z")),
+                (&["-Z", "x"], ill("Z")),
+                (&["-aE", "-p", "1"], ill("E")),
+                (
+                    &["-Xe", "/tmp"],
+                    format!("{}\nlsof: {}", ill("X"), ill("e")),
+                ),
+                (&["-sUDP:"], "unknown -s protocol: \"UDP:\"".to_string()),
+                (
+                    &["-s", "UDP:Idle"],
+                    "unknown -s protocol: \"UDP:Idle\"".to_string(),
+                ),
+                (&["-sudp:^x"], "unknown -s protocol: \"udp:^x\"".to_string()),
+                (&["-sTCP:"], "no TCP state names in: TCP:".to_string()),
+            ] {
+                assert_eq!(columns(argv).unwrap_err(), line, "{argv:?}");
+            }
+            // `-Z` takes no word there: the letter after it is read on.
+            assert_eq!(
+                columns(&["-ZW"]).unwrap_err(),
+                format!("{}\nlsof: {}", ill("Z"), ill("W"))
+            );
+            // `-M` and `+M`, alone or among other letters: read, no effect.
+            let shape = |argv: &[&str]| format!("{:?}", columns(argv).unwrap());
+            let plain = shape(&["-a", "-p", "1"]);
+            for argv in [
+                &["-M", "-a", "-p", "1"][..],
+                &["+M", "-a", "-p", "1"],
+                &["-aM", "-p", "1"],
+                &["-Ma", "-p", "1"],
+            ] {
+                assert_eq!(shape(argv), plain, "{argv:?}");
+            }
+            // TCP states are read as ever.
+            assert!(columns(&["-sTCP:LISTEN"]).unwrap().1.state_filter.is_some());
+        });
     }
 
     /// Where the backend records no flags (Windows), `g` and `G` are refused
@@ -7940,8 +8568,9 @@ mod tests {
             .unwrap_err(),
             // Each conflicting state in the order of the platform's state
             // table: the C's (Linux) has ESTABLISHED before LISTEN, the
-            // Windows table (MIB_TCP_STATE) LISTEN first.
-            if cfg!(windows) {
+            // Windows table (MIB_TCP_STATE) LISTEN first, and FreeBSD's
+            // (`tcpstates[]`) too: measured against its C on 14.5.
+            if cfg!(any(windows, target_os = "freebsd")) {
                 "can't include and exclude TCP state: LISTEN\n\
                  lsof: can't include and exclude TCP state: ESTABLISHED\n\
                  lsof: -x must accompany +d or +D"
@@ -8337,6 +8966,20 @@ mod tests {
         } else {
             "-m not supported".to_string()
         };
+        // FreeBSD's C gives `-m` no value that opens with `-` or `+`, and
+        // none at all: it says `-m not followed by path` and reads that word
+        // again as options (`main.c:676-686`). Linux's takes the word.
+        let m_none = if cfg!(target_os = "freebsd") {
+            "-m not followed by path".to_string()
+        } else {
+            m.clone()
+        };
+        let m_given_back = |after: &[&str]| -> Vec<String> {
+            let mut lines = vec![m_none.clone()];
+            let skip = usize::from(!cfg!(target_os = "freebsd"));
+            lines.extend(after.iter().skip(skip).map(|c| ill(c)));
+            lines
+        };
         let cases: Vec<(&[&str], Vec<String>)> = vec![
             (&["-W"], vec![ill("W")]),
             (&["+W"], vec![ill("W")]),
@@ -8386,14 +9029,14 @@ mod tests {
             ),
             (&["-aD"], vec!["unsupported option: -D".into()]),
             (&["-Da"], vec!["unsupported option: -D".into()]),
-            (&["-m"], vec![m.clone()]),
-            (&["-m", "-W", "-Y"], vec![m.clone(), ill("Y")]),
+            (&["-m"], vec![m_none.clone()]),
+            (&["-m", "-W", "-Y"], m_given_back(&["W", "Y"])),
             (&["-mfoo", "-W"], vec![m.clone(), ill("W")]),
-            (&["-W", "-m"], vec![ill("W"), m.clone()]),
+            (&["-W", "-m"], vec![ill("W"), m_none.clone()]),
             // `--` is no value to `-D` or `-m`, as to `-Z`: it ends the
             // options, and `-W` after it is a name (measured).
             (&["-D", "--", "-W"], vec!["unsupported option: -D".into()]),
-            (&["-m", "--", "-W"], vec![m.clone()]),
+            (&["-m", "--", "-W"], vec![m_none.clone()]),
             (
                 &["-W", "-D", "--", "-Y"],
                 vec![ill("W"), "unsupported option: -D".into()],
@@ -8456,12 +9099,38 @@ mod tests {
         } else {
             assert_eq!(k, [ill("k")]);
         }
-        // Nor is `--` a value to FreeBSD's `-k`.
-        let k = error_lines(parse_on_host(&["-k", "--", "-W"], false));
+        // Nor is `--` a value to FreeBSD's `-k`, nor a word that opens with
+        // `-` or `+`, nor none: the C says `-k not followed by path` and
+        // reads the word again as options (`main.c:600-610`; measured on
+        // FreeBSD 14.5, `-k -W`, `-k -p`, `+k -W`, `-k -- x`, `-k-W`).
+        let freebsd_k: [(&[&str], Vec<String>); 7] = [
+            (&["-k", "--", "-W"], vec![]),
+            (&["-k"], vec![]),
+            (&["-k", "-W"], vec![ill("W")]),
+            (&["-k", "-p"], vec!["no process ID specified".to_string()]),
+            (&["+k", "-W"], vec![ill("W")]),
+            (&["-k", "+W"], vec![ill("W")]),
+            (&["-k-W"], vec![ill("-"), ill("W")]),
+        ];
+        for (argv, after) in freebsd_k {
+            let k = error_lines(parse_on_host(argv, false));
+            if cfg!(target_os = "freebsd") {
+                let mut want = vec!["-k not followed by path".to_string()];
+                want.extend(after);
+                assert_eq!(k, want, "{argv:?}");
+            } else {
+                assert_eq!(
+                    k.first().map(String::as_str),
+                    Some(ill("k").as_str()),
+                    "{argv:?}"
+                );
+            }
+        }
+        // `+k` with a path is the same option, and lsof-rs's refusal names
+        // its prefix.
+        let k = error_lines(parse_on_host(&["+k", "/x"], false));
         if cfg!(target_os = "freebsd") {
-            assert_eq!(k, ["unsupported option: -k"]);
-        } else {
-            assert_eq!(k, [ill("k")]);
+            assert_eq!(k, ["unsupported option: +k"]);
         }
     }
 
@@ -9089,6 +9758,7 @@ mod tests {
             help: true,
             field_help: true,
             version: true,
+            device_cache: false,
         };
         for argv in [
             &["-h", "-v", "-F", "?"][..],
@@ -9104,6 +9774,7 @@ mod tests {
             help: true,
             field_help: false,
             version: true,
+            device_cache: false,
         };
         assert!(matches!(got, Ok(Action::Report(r)) if r == help_and_version));
         assert_eq!(reports, help_and_version);
@@ -9116,6 +9787,7 @@ mod tests {
                 help: false,
                 field_help: true,
                 version: true,
+                device_cache: false,
             }
         );
         let (got, reports) = reported(&["-x", "-h"]);
@@ -9192,20 +9864,33 @@ mod tests {
             selinux_enabled: &disabled,
             ..HostChecks::DEFERRED
         };
-        for (letter, line) in [
-            (&b"-Z"[..], "-Z limited to SELinux"),
-            (b"-m", "-m not supported"),
-            (b"-D", "unsupported option: -D"),
-        ] {
-            let (got, _) = parse_reporting(
-                vec![os(letter), os(b"\xff")],
-                &SafeFs::in_process(),
-                &no_mounts,
-                &host,
-            );
-            let e = got.unwrap_err();
-            assert!(!e.is_fatal(), "{letter:?}");
-            assert_eq!(e.to_string(), line, "{letter:?}");
+        // `-m` is the Linux C's `-m not supported`; on FreeBSD, whose C
+        // takes the word for its kernel memory file, lsof-rs's own
+        // `unsupported option` (DIVERGENCES 148).
+        let dash_m = if cfg!(target_os = "freebsd") {
+            "unsupported option: -m"
+        } else {
+            "-m not supported"
+        };
+        // Twice: as the words are, read with stand-ins for their bytes; and
+        // with a name that holds a stand-in's own character as text, where
+        // stand-ins cannot be used, so the dropped word is not marked read
+        // as text and only the option's having taken it keeps it unread.
+        let stand_in = "\u{10FF41}".as_bytes();
+        assert!(!stand_ins_usable(&[os(b"\xff"), os(stand_in)]));
+        for extra in [None, Some(stand_in)] {
+            for (letter, line) in [
+                (&b"-Z"[..], "-Z limited to SELinux"),
+                (b"-m", dash_m),
+                (b"-D", "unsupported option: -D"),
+            ] {
+                let mut words = vec![os(letter), os(b"\xff")];
+                words.extend(extra.map(os));
+                let (got, _) = parse_reporting(words, &SafeFs::in_process(), &no_mounts, &host);
+                let e = got.unwrap_err();
+                assert!(!e.is_fatal(), "{letter:?} {extra:?}");
+                assert_eq!(e.to_string(), line, "{letter:?} {extra:?}");
+            }
         }
     }
 
@@ -9488,9 +10173,15 @@ mod tests {
             ),
             (vec![os(b"+f\xff")], "unknown file struct option: \\xff"),
             (vec![os(b"-af\xff")], "unknown file struct option: \\xff"),
+            // FreeBSD's C has the letter `c`: measured on 14.5, the one
+            // line for the byte.
             (
                 vec![os(b"-fc\xff")],
-                "unknown file struct option: c\nlsof: unknown file struct option: \\xff",
+                if has_file_struct() {
+                    "unknown file struct option: \\xff"
+                } else {
+                    "unknown file struct option: c\nlsof: unknown file struct option: \\xff"
+                },
             ),
             (vec![os(b"+p"), os(b"\xff")], "illegal process ID: \\xff"),
             (vec![os(b"+g\xff")], "illegal process group ID: \\xff"),
@@ -9510,7 +10201,14 @@ mod tests {
                 "unsupported TCP/TPI info selection: \\xff",
             ),
             (vec![os(b"+Z\xff")], "-Z limited to SELinux"),
-            (vec![os(b"-m\xff")], "-m not supported"),
+            (
+                vec![os(b"-m\xff")],
+                if cfg!(target_os = "freebsd") {
+                    "unsupported option: -m"
+                } else {
+                    "-m not supported"
+                },
+            ),
             (vec![os(b"-D\xff")], "unsupported option: -D"),
         ] {
             let (got, _) = parse_reporting(
@@ -9546,9 +10244,11 @@ mod tests {
             [os(b"\xffx")]
         );
         assert_eq!(sel(vec![os(b"-cz\xc3")]).commands, [os(b"z\xc3")]);
-        let err = parse(vec![os(b"-c"), os(&[0xff; 16])]).unwrap_err();
+        // 20 bytes: past Linux's 15 and FreeBSD's 19 (measured on FreeBSD
+        // 14.5: 16 and 19 are taken there, 20 refused in these words).
+        let err = parse(vec![os(b"-c"), os(&[0xff; 20])]).unwrap_err();
         assert!(
-            err.contains(&format!("\"-c {}\" length (16)", "\\xff".repeat(16))),
+            err.contains(&format!("\"-c {}\" length (20)", "\\xff".repeat(20))),
             "{err}"
         );
         // A byte that is no character, where a letter stands, is the C's

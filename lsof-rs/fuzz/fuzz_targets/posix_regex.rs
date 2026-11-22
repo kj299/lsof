@@ -1,8 +1,10 @@
 #![no_main]
 
-// Fuzz `-c /regex/[bix]` (lsof-core, `posix_regex`; DIVERGENCES 38): a
+// Fuzz `-c /regex/[bix]` (lsof-core, `posix_regex`; DIVERGENCES 38, 183): a
 // POSIX regular expression typed on the command line is read by glibc's
-// grammar, written in the `regex` crate's syntax and compiled under a size
+// grammar or by FreeBSD libc's (`Dialect`, which one byte of the input
+// picks, so that both are fuzzed whatever the platform the fuzzer runs on),
+// written in the `regex` crate's syntax and compiled under a size
 // limit, or, with a back-reference or past the crate's bounds, run by
 // lsof-rs's own engine, over a command name another process chose.
 // Contract, on arbitrary bytes for both: no panic, no hang (the crate is
@@ -26,7 +28,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use lsof_core::posix_regex::{
-    translate, CommandRegex, ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET,
+    translate_in, CommandRegex, Dialect, ORACLE_COMMAND_MAX, OWN_COMMAND_MAX, SEARCH_BUDGET,
 };
 
 /// The longest command matched: the longest process name Linux has; and,
@@ -44,12 +46,18 @@ const ORACLE_STEPS: u64 = 100_000;
 const AGAIN_MAX: usize = 16;
 
 fuzz_target!(|data: &[u8]| {
-    // The first byte picks the flags; a NUL parts the expression from the
-    // command (neither can hold one: both come from C strings).
+    // The first byte picks the flags and the grammar; a NUL parts the
+    // expression from the command (neither can hold one: both come from C
+    // strings).
     let Some((&flags, rest)) = data.split_first() else {
         return;
     };
     let (extended, icase) = (flags & 1 == 0, flags & 2 != 0);
+    let dialect = if flags & 4 == 0 {
+        Dialect::Glibc
+    } else {
+        Dialect::FreeBsd
+    };
     let mut parts = rest.splitn(2, |&b| b == 0);
     let expression = parts.next().unwrap_or_default();
     // A command is a process's name: 15 bytes on Linux (64 for a kernel
@@ -63,15 +71,15 @@ fuzz_target!(|data: &[u8]| {
     // one is THREAT-MODEL.md's, not this target's to time.
     let long = command.get(..OWN_COMMAND_MAX).unwrap_or(command);
     if long.len() > COMMAND_MAX && expression.len() <= SHORT_EXPRESSION {
-        if let Ok(own) = CommandRegex::new_own(expression, extended, icase) {
+        if let Ok(own) = CommandRegex::new_own_in(dialect, expression, extended, icase) {
             let hit = own.is_match(long);
             assert_eq!(own.clone().is_match(long), hit);
         }
     }
     let command = command.get(..COMMAND_MAX).unwrap_or(command);
-    let translated = translate(expression, extended, icase);
-    let own = CommandRegex::new_own(expression, extended, icase);
-    match CommandRegex::new(expression, extended, icase) {
+    let translated = translate_in(dialect, expression, extended, icase);
+    let own = CommandRegex::new_own_in(dialect, expression, extended, icase);
+    match CommandRegex::new_in(dialect, expression, extended, icase) {
         Ok(regex) => {
             assert!(translated.is_ok());
             assert_eq!(regex.expression(), expression);
@@ -111,8 +119,9 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     // Every refusal has its text, on one line and printable.
-    if let Err(e) = translate(expression, extended, icase) {
-        assert!(!e.text().is_empty());
-        assert!(e.text().bytes().all(|b| (0x20..0x7f).contains(&b)));
+    if let Err(e) = translate_in(dialect, expression, extended, icase) {
+        let text = e.text_in(dialect);
+        assert!(!text.is_empty());
+        assert!(text.bytes().all(|b| (0x20..0x7f).contains(&b)));
     }
 });

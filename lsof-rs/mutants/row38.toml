@@ -897,10 +897,10 @@ name = "rx-repetition-not-charged"
 rule = "a repetition costs one"
 [[mutant.edit]]
 file = "crates/lsof-core/src/posix_regex.rs"
-old = '''        self.fetch(false);
+old = '''    ) -> Result<Option<Frag>, RegexError> {
         self.charge(1);
         let Some(elem) = elem else {'''
-new = '''        self.fetch(false);
+new = '''    ) -> Result<Option<Frag>, RegexError> {
         let Some(elem) = elem else {'''
 
 [[mutant]]

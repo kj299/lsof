@@ -787,6 +787,7 @@ mod tests {
         p.raw_names = Some(Box::new(crate::model::RawNames {
             command: Some(b"x\xff"[..].into()),
             login: Some(b"ab\xffcd"[..].into()),
+            task_command: None,
         }));
         let out = render(
             std::slice::from_ref(&p),
@@ -807,39 +808,60 @@ mod tests {
 
     /// `-F ?` is the C's text to the byte, as `lsof -F ?` wrote it to stderr
     /// on the Linux test host (no SELinux): the table's letters less the five
-    /// its build does not list.
+    /// its build does not list. FreeBSD's C lists three of those, the file
+    /// structure's `C`, `F` and `N`: its text on FreeBSD 14.5, to the byte
+    /// too, is the same lines with those three among them.
     #[test]
     fn field_help_is_the_cs_text() {
-        let measured = concat!(
-            "lsof:\tID    field description\n",
-            "\t a    access: r = read; w = write; u = read/write\n",
-            "\t c    command name\n",
-            "\t d    device character code\n",
-            "\t D    major/minor device number as 0x<hex>\n",
-            "\t f    file descriptor\n",
-            "\t G    file flaGs\n",
-            "\t i    inode number\n",
-            "\t k    link count\n",
-            "\t K    task ID (TID)\n",
-            "\t l    lock: r/R = read; w/W = write; u = read/write\n",
-            "\t L    login name\n",
-            "\t m    marker between repeated output\n",
-            "\t M    task comMand name\n",
-            "\t n    comment, name, Internet addresses\n",
-            "\t o    file offset as 0t<dec> or 0x<hex>\n",
-            "\t p    process ID (PID)\n",
-            "\t g    process group ID (PGID)\n",
-            "\t P    protocol name\n",
-            "\t r    raw device number as 0x<hex>\n",
-            "\t R    paRent PID\n",
-            "\t s    file size\n",
-            "\t S    stream module and device names\n",
-            "\t t    file type\n",
-            "\t T    TCP/TPI info\n",
-            "\t u    user ID (UID)\n",
-            "\t 0    (zero) use NUL field terminator instead of NL\n",
-        );
+        // Each line, and whether FreeBSD's C alone prints it.
+        let lines = [
+            ("lsof:\tID    field description\n", false),
+            (
+                "\t a    access: r = read; w = write; u = read/write\n",
+                false,
+            ),
+            ("\t c    command name\n", false),
+            ("\t C    file struct share count\n", true),
+            ("\t d    device character code\n", false),
+            ("\t D    major/minor device number as 0x<hex>\n", false),
+            ("\t f    file descriptor\n", false),
+            ("\t F    file struct address as 0x<hex>\n", true),
+            ("\t G    file flaGs\n", false),
+            ("\t i    inode number\n", false),
+            ("\t k    link count\n", false),
+            ("\t K    task ID (TID)\n", false),
+            (
+                "\t l    lock: r/R = read; w/W = write; u = read/write\n",
+                false,
+            ),
+            ("\t L    login name\n", false),
+            ("\t m    marker between repeated output\n", false),
+            ("\t M    task comMand name\n", false),
+            ("\t n    comment, name, Internet addresses\n", false),
+            ("\t N    file struct node ID as 0x<hex>\n", true),
+            ("\t o    file offset as 0t<dec> or 0x<hex>\n", false),
+            ("\t p    process ID (PID)\n", false),
+            ("\t g    process group ID (PGID)\n", false),
+            ("\t P    protocol name\n", false),
+            ("\t r    raw device number as 0x<hex>\n", false),
+            ("\t R    paRent PID\n", false),
+            ("\t s    file size\n", false),
+            ("\t S    stream module and device names\n", false),
+            ("\t t    file type\n", false),
+            ("\t T    TCP/TPI info\n", false),
+            ("\t u    user ID (UID)\n", false),
+            (
+                "\t 0    (zero) use NUL field terminator instead of NL\n",
+                false,
+            ),
+        ];
+        let measured: String = lines
+            .iter()
+            .filter(|(_, freebsd_only)| !freebsd_only || cfg!(target_os = "freebsd"))
+            .map(|(line, _)| *line)
+            .collect();
         assert_eq!(field_help(), measured);
+        assert_eq!(lines.iter().filter(|(_, f)| *f).count(), 3);
     }
 
     /// The C accepts every letter of its table and nothing else.

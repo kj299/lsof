@@ -234,7 +234,11 @@ impl InetSpec {
         let Some(sock) = &f.socket else {
             return false;
         };
-        if !f.is_internet() || !family_matches(self.family, f) {
+        // A FreeBSD row is compared as that dialect's `ent_inaddr()` hands
+        // it to `is_nw_addr()`: by the ends it entered and the family it
+        // entered them in, below (DIVERGENCES 180).
+        let bsd = sock.is_bsd();
+        if !f.is_internet() || !(bsd || family_matches(self.family, f)) {
             return false;
         }
         // Protocol names are family-agnostic (like TCP/UDP): `-iICMP` matches
@@ -255,10 +259,22 @@ impl InetSpec {
         // (`dsock.c`: `if (tp->faddr || tp->fport) fa = …; else fa = NULL`),
         // so a listener's `0.0.0.0:0` far end is not port 0: measured, `-i
         // :0-` selects no listener.
+        //
+        // FreeBSD's dialect enters an end whatever it holds, and the foreign
+        // end of every IPv4 socket (`SocketInfo::entered_ends`), so there
+        // `-i :0` selects a listener by its `*:*` far end; a socket it
+        // entered no end for (no PCB) no specification selects; and the
+        // family a specification names is the one the ends were entered in,
+        // IPv4 for an IPv6 socket whose addresses are IPv4-mapped (`af !=
+        // n->af`). All measured on FreeBSD 14.5.
+        let [local, remote] = sock.entered_ends();
         let end_matches = |a: Option<std::net::SocketAddr>| -> bool {
-            let Some(a) = a.filter(|a| !a.ip().is_unspecified() || a.port() != 0) else {
+            let Some(a) = a else {
                 return false;
             };
+            if bsd && self.family.is_some_and(|fam| (fam == 6) != a.is_ipv6()) {
+                return false;
+            }
             if let Some(h) = self.host {
                 if a.ip() != h {
                     return false;
@@ -270,10 +286,10 @@ impl InetSpec {
                     .iter()
                     .any(|&(lo, hi)| (lo..=hi).contains(&u32::from(a.port())))
         };
-        if self.host.is_none() && self.ports.is_empty() {
+        if !bsd && self.host.is_none() && self.ports.is_empty() {
             return true;
         }
-        end_matches(sock.local) || end_matches(sock.remote)
+        end_matches(local) || end_matches(remote)
     }
 }
 
@@ -1279,7 +1295,7 @@ impl Selection {
         if self.nfs_only && self.is_nfs_file(f) {
             k.insert(SelKinds::NFS);
         }
-        if self.inet.all_matches(f) {
+        if self.bare_inet_selects(f) {
             k.insert(SelKinds::NET);
         }
         if self.inet.specs.iter().any(|s| s.matches(f)) {
@@ -1405,6 +1421,55 @@ impl Selection {
         self.state_filter
             .as_ref()
             .is_none_or(|filter| filter.admits(f))
+    }
+
+    /// Whether the bare `-i` selects `f`: [`InetFilter::all_matches`], but
+    /// for a FreeBSD row once `-s` names a TCP state to include. That
+    /// dialect then gives `SELNET` to a TCP socket in one of those states,
+    /// whatever IP version `-i4` or `-i6` asked for, and to no other
+    /// Internet socket (`dsock.c:441-447`: `if (!TcpStIn && !UdpStIn)`;
+    /// `ckstate()`, `:289-292`: `TcpStI[tsnx]` alone). Measured on FreeBSD
+    /// 14.5: `-i -s TCP:CLOSED` lists the closed TCP sockets and no UDP
+    /// one, `-i 4 -s TCP:ESTABLISHED` the IPv6 connections too (DIVERGENCES
+    /// 181).
+    fn bare_inet_selects(&self, f: &OpenFile) -> bool {
+        match f.socket.as_deref() {
+            Some(sock) if sock.is_bsd() && self.includes_states() => {
+                self.inet.bare() && self.state_selects(f)
+            }
+            _ => self.inet.all_matches(f),
+        }
+    }
+
+    /// Whether `-s` names a TCP state to include.
+    fn includes_states(&self) -> bool {
+        self.state_filter
+            .as_ref()
+            .is_some_and(|s| !s.include.is_empty())
+    }
+
+    /// Whether `f` is a FreeBSD TCP socket in a state `-s` includes, which
+    /// that dialect's `ckstate()` gives `SELNET` with no regard to `-i`
+    /// (`dsock.c:288-292`, called for every TCP socket with a PCB at `:470`
+    /// and `:513`), and which `is_file_sel()` then keeps under the OR, as it
+    /// keeps any non-empty `lf->sf` (`lib/proc.c:566-585`). So in OR mode
+    /// the C lists such a socket of every process it reads whether `-i` is
+    /// bare, a specification or absent: measured on FreeBSD 14.5, `-s
+    /// TCP:LISTEN -i UDP` lists the UDP sockets and every listener, `-U -s
+    /// TCP:LISTEN` the UNIX sockets and every listener. Under `-a` the bit
+    /// is one more the AND need not have asked for. Linux's dialect gives
+    /// `SELNET` to a socket only for `-i` (`dsock.c:3882`), and its rows are
+    /// not BSD ones (DIVERGENCES 181).
+    fn state_selects(&self, f: &OpenFile) -> bool {
+        let Some(filter) = &self.state_filter else {
+            return false;
+        };
+        f.is_internet()
+            && f.socket.as_deref().is_some_and(|s| {
+                s.is_bsd()
+                    && s.filter_state()
+                        .is_some_and(|st| filter.include.contains(&st))
+            })
     }
 
     /// Whether `p` is absolutely excluded by a `^` negation on `-u`, `-c`,
@@ -2050,20 +2115,23 @@ impl Selection {
     /// (`dsock.c:3691`). A file-system item names nothing (DIVERGENCES 139,
     /// 17).
     fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+        if let Some(name) = self.located_name(ix, f) {
+            f.set_base_name(&name);
+        }
+    }
+
+    /// The name [`Selection::rename_located`] gives `f`, if it gives one.
+    fn located_name(&self, ix: &PathIndex<'_>, f: &OpenFile) -> Option<String> {
         if f.is_socket() {
-            return;
+            return None;
         }
         // No NFS mount is asked for: the item a file system locates is a
         // file-system item, which names nothing (`row_name`), whichever
         // of a device's it is.
-        let Some(name) = ix
-            .bound(f, || None)
+        ix.bound(f, || None)
             .and_then(|i| self.path_items.get(i))
             .and_then(PathItem::row_name)
-        else {
-            return;
-        };
-        f.set_base_name(&name.to_string_lossy());
+            .map(|name| name.to_string_lossy().into_owned())
     }
 
     /// Apply the full selection to a backend's raw output, returning the
@@ -2131,15 +2199,17 @@ impl Selection {
                 self.entry_kinds(&p, &with_tasks)
             };
             let peer_only = !excluded && p.endpoint_peer && inherited.is_empty();
-            p.files.retain_mut(|f| {
+            // A FreeBSD TCP socket in a state `-s` includes is selected by
+            // that alone ([`Selection::state_selects`]), in every process the
+            // C reads: not in one `is_proc_excl()` drops before its files are
+            // read, as `-p Q -s TCP:LISTEN` drops every process but Q.
+            let states_select = !excluded && self.includes_states() && self.selects_process(&p);
+            let keeps = |f: &crate::model::OpenFile| {
                 // `-s` is not a list option: it can only veto. Its exclusion
                 // form is the C's `SELEXCLF`, which outranks even the OR
                 // (`lib/proc.c:572`).
                 if !self.state_matches(f) {
                     return false;
-                }
-                if let Some(ix) = &naming {
-                    self.rename_located(ix, f);
                 }
                 if specified.is_empty() {
                     return true; // AllProc
@@ -2154,7 +2224,11 @@ impl Selection {
                     }
                     specified
                 } else {
-                    inherited.union(self.file_kinds(f))
+                    let mut sf = inherited.union(self.file_kinds(f));
+                    if states_select && self.state_selects(f) {
+                        sf.insert(SelKinds::NET);
+                    }
+                    sf
                 };
                 if sf.is_empty() {
                     return false;
@@ -2165,7 +2239,28 @@ impl Selection {
                 // requirement, which matched the C on a multi-threaded process
                 // and listed a single-threaded one the C does not.
                 !self.and_mode || sf.contains(specified)
+            };
+            // A path names the rows it locates as they are read. A list no
+            // row of which is renamed and every row of which is kept is left
+            // as it is, and so still shared with the other entries that
+            // share it: a `-K` thread's with its process's (`Files`); one
+            // that loses rows is made of the rows kept alone.
+            let renames = naming.as_ref().is_some_and(|ix| {
+                p.files
+                    .iter()
+                    .any(|f| self.state_matches(f) && self.located_name(ix, f).is_some())
             });
+            if let (Some(ix), true) = (&naming, renames) {
+                p.files.retain_mut(|f| {
+                    if !self.state_matches(f) {
+                        return false;
+                    }
+                    self.rename_located(ix, f);
+                    keeps(f)
+                });
+            } else if !p.files.iter().all(keeps) {
+                p.files.keep(keeps);
+            }
             if p.files.is_empty() {
                 // A process with no rows left is a result only when it was
                 // itself selected and no file selecter was given — the case
@@ -2578,6 +2673,7 @@ mod tests {
         raw.raw_names = Some(Box::new(crate::model::RawNames {
             command: Some(b"x\xffname"[..].into()),
             login: None,
+            task_command: None,
         }));
         let text = who(20, "aaaaaaaaézz", 0, 20);
         let sel = |needle: &[u8]| Selection {
@@ -3408,7 +3504,8 @@ mod tests {
             files: vec![
                 row("/usr/bin/python3", 65024), // on the named filesystem
                 row("/dev/null", 6),            // NOT on it — a different mount
-            ],
+            ]
+            .into(),
         };
         let got = sel.apply(vec![p]);
         assert_eq!(got.len(), 1);
@@ -3468,7 +3565,8 @@ mod tests {
                 // Named under the query, but a different file: the old
                 // prefix match invented this row.
                 row("C:\\dir\\inside.txt", "C:", "99"),
-            ],
+            ]
+            .into(),
         };
         let got = sel.apply(vec![p]);
         assert_eq!(got.len(), 1);
@@ -3518,7 +3616,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files,
+            files: files.into(),
         }
     }
 
@@ -3835,7 +3933,8 @@ mod tests {
                     "502",
                     Some(bound("/d/other.sock", None)),
                 ),
-            ],
+            ]
+            .into(),
         };
         let got = sel.apply(vec![p]);
         let nodes: Vec<&str> = got[0]
@@ -3895,7 +3994,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files,
+            files: files.into(),
         };
         let item = |id: Option<(u64, u64)>, fs: Option<u64>, name: &str| PathItem {
             id: id.map(|(dev, ino)| FileId { dev, ino }),
@@ -4245,7 +4344,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![file(name)],
+            files: vec![file(name)].into(),
         };
         assert_eq!(sel.locate(&[p("c:\\dir\\a.txt")]).paths, [true, false]);
         // Only a file the path filter selects is compared: `+d` takes what is
@@ -4428,7 +4527,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![pipe.clone(), reg.clone()],
+            files: vec![pipe.clone(), reg.clone()].into(),
         };
         // 8888 matches no selector and is no peer: dropped as usual.
         let stranger = Process {
@@ -4444,7 +4543,7 @@ mod tests {
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![pipe, reg],
+            files: vec![pipe, reg].into(),
         };
         let sel = Selection {
             pids: vec![1000],
@@ -4639,7 +4738,7 @@ mod tests {
         ];
         let p = Process {
             pid: 9,
-            files,
+            files: files.into(),
             ..who(9, "x", 0, 9)
         };
         let listed = |args: &[(&str, bool)]| {
@@ -4793,7 +4892,7 @@ mod tests {
         };
         let p = Process {
             pid: 9,
-            files: vec![f],
+            files: vec![f].into(),
             ..who(9, "x", 0, 9)
         };
         for linux in [true, false] {
@@ -4880,12 +4979,88 @@ mod tests {
             ppid: Some(1),
             command: command.into(),
             user: Some(format!("u{uid}")),
-            files: Vec::new(),
+            files: Vec::new().into(),
             endpoint_peer: false,
             unlisted: false,
             raw_names: None,
             file_structs: None,
         }
+    }
+
+    /// Safety review LOW-1 (DIVERGENCES 141): under `-K` a process's thread
+    /// entries share its files, and the selection leaves them shared where
+    /// it keeps every row, so a run holds them once a process, not once a
+    /// thread; where it drops rows, the entry it drops them from has a list
+    /// of its own, and the others keep theirs.
+    #[test]
+    fn a_threads_files_stay_shared_where_every_row_is_kept() {
+        let mut main = who(10, "thr", 0, 10);
+        main.files = vec![tcp(3, 80, None, TcpState::Listen), udp(4, 81, None)].into();
+        let threads: Vec<Process> = (0..3)
+            .map(|t| {
+                let mut p = main.clone();
+                p.tid = Some(100 + t);
+                p
+            })
+            .collect();
+        assert!(threads.iter().all(|t| t.files.shares(&main.files)));
+        let kept = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            ..Default::default()
+        }
+        .apply(threads.clone());
+        assert_eq!(kept.len(), 3);
+        assert!(kept
+            .iter()
+            .all(|t| t.files.shares(&main.files) && t.files.len() == 2));
+        // `-a -K -p 10 -d 3`: each entry keeps fd 3 alone, in its own list.
+        let one = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            and_mode: true,
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(3)],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        }
+        .apply(threads.clone());
+        assert_eq!(one.len(), 3);
+        assert!(one
+            .iter()
+            .all(|t| !t.files.shares(&main.files) && t.files.len() == 1));
+        assert_eq!(main.files.len(), 2, "the process's own list is untouched");
+        // `-K -p 10 /` (a path, named as rows are read): no row is renamed,
+        // so the lists stay shared (the safety review's INFO-1).
+        let mut named = Selection {
+            pids: vec![10],
+            tasks: TaskMode::Always,
+            paths_identified: true,
+            ..Default::default()
+        };
+        named.add_fs_item(99, "/".into(), None);
+        let kept = named.apply(threads.clone());
+        assert_eq!(kept.len(), 3);
+        assert!(kept
+            .iter()
+            .all(|t| t.files.shares(&main.files) && t.files.len() == 2));
+    }
+
+    /// A shared list that loses rows is made of the rows kept alone, and
+    /// one no other entry shares loses them in place.
+    #[test]
+    fn a_shared_list_that_loses_rows_is_made_of_those_kept() {
+        let mut main = who(10, "thr", 0, 10);
+        main.files = vec![tcp(3, 80, None, TcpState::Listen), udp(4, 81, None)].into();
+        let mut thread = main.clone();
+        thread.files.keep(|f| f.fd == FdType::Handle(3));
+        assert!(!thread.files.shares(&main.files));
+        assert_eq!((thread.files.len(), main.files.len()), (1, 2));
+        let before: *const OpenFile = &main.files[0];
+        main.files.keep(|f| f.fd == FdType::Handle(3));
+        assert_eq!(main.files.len(), 1);
+        assert!(std::ptr::eq(before, &main.files[0]), "kept in place");
     }
 
     /// The C's per-process `Ckscko` (`dproc.c:263-286, 909-916`): a network
@@ -5145,7 +5320,15 @@ mod tests {
     #[test]
     fn a_command_regex_selects_and_is_located_as_a_name_is() {
         use crate::posix_regex::CommandRegex;
-        let rx = |e: &str| CommandRegex::new(e.as_bytes(), true, false).unwrap();
+        let rx = |e: &str| {
+            CommandRegex::new_in(
+                crate::posix_regex::Dialect::Glibc,
+                e.as_bytes(),
+                true,
+                false,
+            )
+            .unwrap()
+        };
         let sel = Selection {
             command_regexes: vec![rx("^py"), rx("zz")],
             ..Default::default()
@@ -5189,11 +5372,18 @@ mod tests {
             raw_names: Some(Box::new(crate::RawNames {
                 command: Some(b"py\xff"[..].into()),
                 login: None,
+                task_command: None,
             })),
             ..who(13, "py\u{fffd}", 0, 1)
         };
         let bytes = Selection {
-            command_regexes: vec![CommandRegex::new(b"^py\xff$", true, false).unwrap()],
+            command_regexes: vec![CommandRegex::new_in(
+                crate::posix_regex::Dialect::Glibc,
+                b"^py\xff$",
+                true,
+                false,
+            )
+            .unwrap()],
             ..Default::default()
         };
         assert!(bytes.selects_process(&raw));
@@ -5207,7 +5397,8 @@ mod tests {
     #[test]
     fn under_and_a_command_regex_is_asked_only_of_what_the_ids_let_through() {
         use crate::posix_regex::CommandRegex;
-        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let rx = CommandRegex::new_in(crate::posix_regex::Dialect::Glibc, b"(.)\\1", true, false)
+            .unwrap();
         let and = Selection {
             pids: vec![11],
             command_regexes: vec![rx.clone()],
@@ -5225,7 +5416,8 @@ mod tests {
         assert_eq!(and.locate(&procs).command_regexes, [true]);
         assert_eq!(rx.kept(), 1);
         // Without -a, every process is asked.
-        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let rx = CommandRegex::new_in(crate::posix_regex::Dialect::Glibc, b"(.)\\1", true, false)
+            .unwrap();
         let or = Selection {
             pids: vec![11],
             command_regexes: vec![rx.clone()],
@@ -5235,7 +5427,8 @@ mod tests {
         assert_eq!(or.locate(&procs).command_regexes, [true]);
         assert_eq!(rx.kept(), 4);
         // Under -a with -u, a process of another user is not asked either.
-        let rx = CommandRegex::new(b"(.)\\1", true, false).unwrap();
+        let rx = CommandRegex::new_in(crate::posix_regex::Dialect::Glibc, b"(.)\\1", true, false)
+            .unwrap();
         let user = Selection {
             users: vec!["u1".to_string()],
             command_regexes: vec![rx.clone()],
@@ -5356,7 +5549,8 @@ mod tests {
             tcp(3, 80, None, crate::TcpState::Listen),
             tcp(4, 443, None, crate::TcpState::Listen),
             tcp(5, 5000, None, crate::TcpState::Listen),
-        ];
+        ]
+        .into();
         assert_eq!(
             sel.locate(std::slice::from_ref(&p)).inet,
             [true, true, false]
@@ -5387,6 +5581,250 @@ mod tests {
         );
     }
 
+    /// `f` as the FreeBSD backend makes it: that dialect's record, and the
+    /// ends as it entered them.
+    fn bsd(mut f: OpenFile, local: Option<&str>, remote: Option<&str>) -> OpenFile {
+        use crate::model::{BsdSocket, TcpExtInfo};
+        let s = f.socket.as_deref_mut().expect("a socket row");
+        s.local = local.map(|a| a.parse().unwrap());
+        s.remote = remote.map(|a| a.parse().unwrap());
+        s.tcp = Some(TcpExtInfo {
+            bsd: Some(BsdSocket::default()),
+            ..Default::default()
+        });
+        f
+    }
+
+    /// FreeBSD's dialect enters an end whatever it holds, and the foreign
+    /// end of every IPv4 socket (DIVERGENCES 180). Measured on 14.5: `-i :0`
+    /// selects an IPv4 listener (its `*:*` far end), an unbound socket of
+    /// either version (its `*:*` near end) and no IPv6 listener; a socket
+    /// with no PCB, which has no end, is selected by no specification.
+    #[test]
+    fn a_freebsd_end_is_an_end_whatever_it_holds() {
+        let listen = TcpState::Listen;
+        let v4 = bsd(
+            tcp(4, 1, None, listen),
+            Some("127.0.0.1:41000"),
+            Some("0.0.0.0:0"),
+        );
+        let mut v6 = bsd(tcp(11, 1, None, listen), Some("[::1]:41002"), None);
+        v6.file_type = FileType::Ipv6;
+        let mut unbound6 = bsd(tcp(10, 1, None, TcpState::Closed), Some("[::]:0"), None);
+        unbound6.file_type = FileType::Ipv6;
+        let no_pcb = bsd(tcp(24, 1, None, listen), None, None);
+        let zero = spec(":0", &[(0, 0)], None);
+        assert!(zero.matches(&v4), "the far end, 0.0.0.0:0");
+        assert!(!zero.matches(&v6), "no far end was entered");
+        assert!(zero.matches(&unbound6), "the near end, [::]:0");
+        assert!(spec(":41000", &[(41000, 41000)], None).matches(&v4));
+        assert!(spec("@127.0.0.1", &[], Some("127.0.0.1")).matches(&v4));
+        assert!(!spec("@127.0.0.2", &[], Some("127.0.0.2")).matches(&v4));
+        // A protocol alone needs an end to be asked about.
+        let proto = InetSpec {
+            text: "TCP".into(),
+            proto: Some(Protocol::Tcp),
+            ..Default::default()
+        };
+        assert!(proto.matches(&v4) && proto.matches(&unbound6));
+        assert!(
+            !proto.matches(&no_pcb),
+            "no end, so `is_nw_addr()` is not asked"
+        );
+        assert!(!zero.matches(&no_pcb));
+        let udp_only = InetSpec {
+            proto: Some(Protocol::Udp),
+            ..proto.clone()
+        };
+        assert!(!udp_only.matches(&v4));
+        // Another backend's row with the same ends: the all-zero end is none,
+        // whatever else the row carries that is not FreeBSD's record.
+        let mut linux = tcp(4, 41000, Some("0.0.0.0:0"), listen);
+        assert!(!zero.matches(&linux));
+        assert!(proto.matches(&linux));
+        if let Some(s) = linux.socket.as_deref_mut() {
+            s.tcp = Some(crate::model::TcpExtInfo::default());
+        }
+        assert!(!zero.matches(&linux));
+    }
+
+    /// The family a specification names is the one FreeBSD's dialect entered
+    /// the ends in: IPv4 for an IPv6 socket whose addresses are IPv4-mapped
+    /// (measured: `-i 4TCP` lists the accepted end of a dual-stack listener,
+    /// `-i 6TCP` does not), while the bare `-i4` and `-i6` go by the
+    /// socket's own version (`-i 6` lists it, `-i 4` does not).
+    #[test]
+    fn a_freebsd_specification_names_the_family_of_the_ends() {
+        let est = TcpState::Established;
+        let mut mapped = bsd(
+            tcp(19, 1, None, est),
+            Some("127.0.0.1:41004"),
+            Some("127.0.0.1:57490"),
+        );
+        mapped.file_type = FileType::Ipv6;
+        let mut v6 = bsd(
+            tcp(13, 1, None, est),
+            Some("[::1]:41002"),
+            Some("[::1]:40324"),
+        );
+        v6.file_type = FileType::Ipv6;
+        let fam = |family: u8, port: u32| InetSpec {
+            family: Some(family),
+            ..spec("", &[(port, port)], None)
+        };
+        assert!(fam(4, 41004).matches(&mapped));
+        assert!(!fam(6, 41004).matches(&mapped));
+        assert!(fam(6, 41002).matches(&v6));
+        assert!(!fam(4, 41002).matches(&v6));
+        let proto = |family: u8| InetSpec {
+            family: Some(family),
+            proto: Some(Protocol::Tcp),
+            ..Default::default()
+        };
+        assert!(proto(4).matches(&mapped) && !proto(6).matches(&mapped));
+        assert!(proto(6).matches(&v6) && !proto(4).matches(&v6));
+        // The bare form: the socket's own version.
+        let mut six = InetFilter::default();
+        six.add_all(Some(6));
+        assert!(six.all_matches(&mapped) && six.all_matches(&v6));
+        let mut four = InetFilter::default();
+        four.add_all(Some(4));
+        assert!(!four.all_matches(&mapped));
+        // Another backend's IPv6 row is asked by its type, as before.
+        let mut linux = tcp(19, 41004, Some("127.0.0.1:57490"), est);
+        linux.file_type = FileType::Ipv6;
+        assert!(fam(6, 41004).matches(&linux) && !fam(4, 41004).matches(&linux));
+    }
+
+    /// With a TCP state to include, FreeBSD's bare `-i` selects the TCP
+    /// sockets in it, of either IP version, and no other Internet socket
+    /// (DIVERGENCES 181). Measured on 14.5: `-i -s TCP:CLOSED` lists the
+    /// closed TCP sockets and no UDP one; `-i 4 -s TCP:ESTABLISHED` the IPv6
+    /// connections too; an exclusion alone leaves `-i` as it was.
+    #[test]
+    fn a_freebsd_state_inclusion_is_what_the_bare_i_selects() {
+        let closed = bsd(
+            tcp(3, 1, None, TcpState::Closed),
+            Some("0.0.0.0:0"),
+            Some("0.0.0.0:0"),
+        );
+        let mut est6 = bsd(
+            tcp(12, 1, None, TcpState::Established),
+            Some("[::1]:40324"),
+            Some("[::1]:41002"),
+        );
+        est6.file_type = FileType::Ipv6;
+        let dgram = bsd(udp(7, 1, None), Some("0.0.0.0:0"), Some("0.0.0.0:0"));
+        let kept = |sel: &Selection| -> Vec<u64> {
+            let mut p = who(10, "socks", 0, 10);
+            p.files = vec![closed.clone(), est6.clone(), dgram.clone()].into();
+            sel.apply(vec![p])
+                .iter()
+                .flat_map(|p| &p.files)
+                .map(|f| match f.fd {
+                    FdType::Handle(n) => n,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        let with = |family: Option<u8>, include: &[TcpState], exclude: &[TcpState]| {
+            let mut sel = states(include, exclude);
+            sel.inet.add_all(family);
+            sel
+        };
+        assert_eq!(kept(&with(None, &[TcpState::Closed], &[])), [3]);
+        assert_eq!(kept(&with(Some(4), &[TcpState::Established], &[])), [12]);
+        assert_eq!(kept(&with(Some(4), &[TcpState::Closed], &[])), [3]);
+        // An exclusion alone: `-i` as ever, less the excluded state.
+        assert_eq!(kept(&with(None, &[], &[TcpState::Closed])), [12, 7]);
+        assert_eq!(kept(&with(Some(4), &[], &[TcpState::Established])), [3, 7]);
+        // No `-s`: the version decides, and the UDP socket is listed.
+        let mut plain = Selection::default();
+        plain.inet.add_all(Some(4));
+        assert_eq!(kept(&plain), [3, 7]);
+        // No selector at all: every file but the ones the inclusion vetoes.
+        assert_eq!(kept(&states(&[TcpState::Closed], &[])), [3, 7]);
+        // `-p 99` alone: `is_proc_excl()` drops the process before its files
+        // are read, so its sockets select nothing.
+        let other_pid = Selection {
+            pids: vec![99],
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(
+            kept(&other_pid),
+            [],
+            "`-p 99 -s TCP:CLOSED` selects no socket"
+        );
+        // Any other selector, under the OR: a TCP socket in an included state
+        // is selected by that alone (`ckstate()` sets `SELNET` whatever `-i`
+        // says), beside what the selectors select. Measured on FreeBSD 14.5:
+        // `-s TCP:LISTEN -i :9`, `-i UDP`, `-U`, `-d 0`.
+        let mut port9 = states(&[TcpState::Closed], &[]);
+        port9.inet.specs.push(spec(":9", &[(9, 9)], None));
+        assert_eq!(kept(&port9), [3], "-s TCP:CLOSED -i :9");
+        let mut by_udp = states(&[TcpState::Closed], &[]);
+        by_udp.inet.specs.push(InetSpec {
+            text: "UDP".into(),
+            proto: Some(Protocol::Udp),
+            ..Default::default()
+        });
+        assert_eq!(kept(&by_udp), [3, 7], "-s TCP:CLOSED -i UDP");
+        let unix = Selection {
+            unix_only: true,
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(kept(&unix), [3], "-U -s TCP:CLOSED");
+        let fd0 = Selection {
+            fd_filter: Some(FdFilter {
+                include: vec![FdSpec::Num(0)],
+                exclude: vec![],
+            }),
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(kept(&fd0), [3], "-d 0 -s TCP:CLOSED");
+        // Two process selectors skip no process in the C, so the socket of
+        // a process neither names is selected all the same.
+        let two = Selection {
+            pids: vec![99],
+            users: vec!["nobody".into()],
+            ..states(&[TcpState::Closed], &[])
+        };
+        assert_eq!(kept(&two), [3], "-p 99 -u nobody -s TCP:CLOSED");
+        // A state the inclusion does not name selects nothing.
+        let mut est = states(&[TcpState::Established], &[]);
+        est.inet.specs.push(spec(":9", &[(9, 9)], None));
+        assert_eq!(kept(&est), [12]);
+        // Under `-a` the state's bit is not what the AND asked for.
+        for (sel, want) in [
+            (port9, &[][..]),
+            (by_udp, &[7][..]),
+            (unix, &[]),
+            (fd0, &[]),
+        ] {
+            let and = Selection {
+                and_mode: true,
+                ..sel
+            };
+            assert_eq!(kept(&and), want, "under -a");
+        }
+        // Another backend's rows keep the rule they had: the version, and a
+        // socket with no TCP state is not vetoed.
+        let linux: Vec<OpenFile> = vec![tcp(3, 80, None, TcpState::Established), udp(7, 81, None)];
+        let mut p = who(10, "srv", 0, 10);
+        p.files = linux.into();
+        let got = with(Some(4), &[TcpState::Established], &[]).apply(vec![p]);
+        assert_eq!(got[0].files.len(), 2);
+        // And without -i, a Linux row in an included state is no selected
+        // row: the Linux C's ckstate() gives it no SELNET.
+        let mut p = who(10, "srv", 0, 10);
+        p.files = vec![tcp(3, 80, None, TcpState::Established)].into();
+        let unix_only = Selection {
+            unix_only: true,
+            ..states(&[TcpState::Established], &[])
+        };
+        assert!(unix_only.apply(vec![p]).iter().all(|p| p.files.is_empty()));
+    }
+
     #[test]
     fn under_and_a_bare_i_and_a_spec_are_separate_requirements() {
         // The C's SELNET and SELNA: `-a -p P -i -i:9` needs both, so P's
@@ -5402,7 +5840,8 @@ mod tests {
         p.files = vec![
             tcp(3, 5000, None, crate::TcpState::Listen),
             tcp(4, 9, None, crate::TcpState::Listen),
-        ];
+        ]
+        .into();
         let kept: Vec<u16> = sel
             .apply(vec![p])
             .iter()
@@ -5428,7 +5867,7 @@ mod tests {
         };
         sel.inet.add_all(None);
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![tcp(9, 5000, None, crate::TcpState::Listen)];
+        p.files = vec![tcp(9, 5000, None, crate::TcpState::Listen)].into();
         assert!(sel.locate(std::slice::from_ref(&p)).inet_all);
         assert!(sel
             .apply(vec![p.clone()])
@@ -5473,8 +5912,11 @@ mod tests {
     // socket here would be outside the table and pass. The platform-neutral
     // half — a TCP list vetoes TCP sockets and nothing else — is
     // `a_state_filter_can_only_veto_never_select`.
+    // Not FreeBSD's either: its table (`tcpstates[]`) has no `CLOSE`, its
+    // rows give a UDP socket no state, and its C's rule under `-s` is
+    // another, measured there: `a_freebsd_state_inclusion_is_what_the_bare_i_selects`.
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "freebsd")))]
     fn a_tcp_state_list_filters_udp_by_its_reused_state_and_nothing_else() {
         // Measured against the C on a process holding every shape: a TCP
         // listener, an established TCP socket, an unconnected UDP socket
@@ -5506,7 +5948,7 @@ mod tests {
         ];
         let kept = |sel: Selection| -> Vec<u64> {
             let mut p = who(10, "srv", 0, 10);
-            p.files = files.to_vec();
+            p.files = files.to_vec().into();
             sel.apply(vec![p])
                 .iter()
                 .flat_map(|p| &p.files)
@@ -5532,7 +5974,7 @@ mod tests {
         // newer than its table is neither required nor excluded.
         let sel = states(&[TcpState::Listen], &[]);
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![tcp(4, 80, None, TcpState::Unknown)];
+        p.files = vec![tcp(4, 80, None, TcpState::Unknown)].into();
         assert_eq!(sel.apply(vec![p])[0].files.len(), 1);
     }
 
@@ -5552,12 +5994,12 @@ mod tests {
             exclude: vec![],
         });
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![tcp(4, 80, None, TcpState::Listen)];
+        p.files = vec![tcp(4, 80, None, TcpState::Listen)].into();
         assert_eq!(sel.locate(&[p]).states, [false, false, true]);
         // An unconnected UDP socket locates CLOSE, as it is filtered by it.
         let sel = states(&[TcpState::Close], &[]);
         let mut p = who(10, "srv", 0, 10);
-        p.files = vec![udp(7, 82, Some(TcpState::Close))];
+        p.files = vec![udp(7, 82, Some(TcpState::Close))].into();
         assert_eq!(sel.locate(&[p]).states, [true]);
     }
 
@@ -5643,13 +6085,13 @@ mod tests {
     fn k_linux() -> Vec<Process> {
         let cwd = || k_row(FdType::Cwd, FileType::Dir);
         let mut one = who(1, "one", 0, 1);
-        one.files = vec![cwd()];
+        one.files = vec![cwd()].into();
         let mut two = who(2, "two", 0, 2);
-        two.files = vec![cwd()];
+        two.files = vec![cwd()].into();
         let mut task = who(2, "two", 0, 2);
         task.tid = Some(3);
         task.task_command = Some("t".into());
-        task.files = vec![cwd()];
+        task.files = vec![cwd()].into();
         vec![one, two, task]
     }
 
@@ -5753,7 +6195,8 @@ mod tests {
             k_row(FdType::Handle(4), FileType::Regular),
             k_row(FdType::Handle(8), FileType::Thread),
             k_row(FdType::Task, FileType::Thread),
-        ];
+        ]
+        .into();
         let bare = Selection {
             tasks: TaskMode::Always,
             ..Default::default()
@@ -5790,7 +6233,7 @@ mod tests {
             ..and_p7.clone()
         };
         let mut no_socket = who(7, "app.exe", 0, 7);
-        no_socket.files = vec![k_row(FdType::Task, FileType::Thread)];
+        no_socket.files = vec![k_row(FdType::Task, FileType::Thread)].into();
         assert!(!and_i.locate(std::slice::from_ref(&no_socket)).tasks);
         let mut with_socket = no_socket.clone();
         with_socket
@@ -5837,10 +6280,10 @@ mod tests {
             bound: None,
         }));
         let mut other = who(2, "other", 0, 2);
-        other.files = vec![inet];
+        other.files = vec![inet].into();
         let mut task = who(2, "other", 0, 2);
         task.tid = Some(5);
-        task.files = vec![k_row(FdType::Cwd, FileType::Dir)];
+        task.files = vec![k_row(FdType::Cwd, FileType::Dir)].into();
         let mine = who(1, "mine", 0, 1);
         let gathered = vec![mine, other, task];
         let mut sel = Selection {
@@ -5945,9 +6388,9 @@ mod tests {
             f
         };
         let mut a = who(10, "python3", 0, 10);
-        a.files = vec![row(3), row(4)];
+        a.files = vec![row(3), row(4)].into();
         let mut b = who(20, "kidb", 0, 10);
-        b.files = vec![row(3)];
+        b.files = vec![row(3)].into();
         let gathered = vec![a, b];
         let base = Selection {
             endpoints: Some(EndpointMode::Info),
@@ -6038,12 +6481,19 @@ mod tests {
             f
         };
         let mut a = who(10, "fixA", 0, 10);
-        a.files = vec![row(3), row(4)];
+        a.files = vec![row(3), row(4)].into();
         let mut b = who(20, "fixB", 0, 20);
-        b.files = vec![row(3), row(4)];
+        b.files = vec![row(3), row(4)].into();
         let gathered = vec![a, b];
-        let rx =
-            |s: &str| crate::posix_regex::CommandRegex::new(s.as_bytes(), true, false).unwrap();
+        let rx = |s: &str| {
+            crate::posix_regex::CommandRegex::new_in(
+                crate::posix_regex::Dialect::Glibc,
+                s.as_bytes(),
+                true,
+                false,
+            )
+            .unwrap()
+        };
         let fd3 = Some(FdFilter {
             include: vec![FdSpec::Num(3)],
             exclude: Vec::new(),
@@ -6194,9 +6644,9 @@ mod tests {
             f
         };
         let mut w = who(10, "w", 0, 10);
-        w.files = vec![pipe(4, crate::model::AccessMode::Write)];
+        w.files = vec![pipe(4, crate::model::AccessMode::Write)].into();
         let mut r = who(20, "r", 0, 20);
-        r.files = vec![pipe(3, crate::model::AccessMode::Read)];
+        r.files = vec![pipe(3, crate::model::AccessMode::Read)].into();
         let gathered = vec![w, r];
         let mut sel = Selection {
             pids: vec![10],

@@ -404,25 +404,51 @@ fn open_raw() -> (Raw, usize, bool) {
     (Box::new(Fd1), size, line)
 }
 
-/// Elsewhere on Unix a duplicate of descriptor 1, the same open file.
+/// Elsewhere on Unix descriptor 1 itself, written through a duplicate made
+/// for each write and closed after it (the same open file), so that lsof
+/// holds no descriptor of its own between writes, as the C, which writes
+/// through descriptor 1, holds none. A duplicate kept open for the run was
+/// lsof's `3w` in its own listing from the second `-r` cycle on (the parity
+/// review of the FreeBSD work, finding 7). Where no duplicate can be made
+/// (every descriptor taken), std's standard output, flushed at once.
+#[cfg(all(unix, not(target_os = "linux")))]
+struct Fd1;
+
+#[cfg(all(unix, not(target_os = "linux")))]
+impl Write for Fd1 {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        use std::os::fd::AsFd;
+        match std::io::stdout().as_fd().try_clone_to_owned() {
+            Ok(fd) => std::fs::File::from(fd).write(data),
+            Err(_) => {
+                let mut out = std::io::stdout();
+                let n = out.write(data)?;
+                out.flush()?;
+                Ok(n)
+            }
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(all(unix, not(target_os = "linux")))]
 fn open_raw() -> (Raw, usize, bool) {
     use std::io::IsTerminal;
     use std::os::fd::AsFd;
     use std::os::unix::fs::MetadataExt;
-    match std::io::stdout().as_fd().try_clone_to_owned() {
-        Ok(fd) => {
-            let file = std::fs::File::from(fd);
-            let blksize = file.metadata().ok().map(|m| m.blksize());
-            let line = file.is_terminal();
-            (Box::new(file), buffer_size(blksize), line)
-        }
-        Err(_) => {
-            let out = std::io::stdout();
-            let line = out.is_terminal();
-            (Box::new(out), BUFSIZ, line)
-        }
-    }
+    // The buffer's size and whether it is a line's, from a duplicate
+    // closed again at once.
+    let blksize = std::io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .ok()
+        .and_then(|fd| std::fs::File::from(fd).metadata().ok())
+        .map(|m| m.blksize());
+    let line = std::io::stdout().is_terminal();
+    let size = buffer_size(blksize);
+    (Box::new(Fd1), size, line)
 }
 
 /// Off Unix, std's standard output.

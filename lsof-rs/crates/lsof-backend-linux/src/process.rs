@@ -65,15 +65,6 @@ pub fn enumerate() -> Enumerated {
     out
 }
 
-/// `/proc/<pid>/status` (or a task's), as text — decoded **lossily**, through
-/// [`crate::text::read_lossy`]. `Name:` is whatever the process set with
-/// `prctl(PR_SET_NAME)` and need not be UTF-8; read strictly, the first byte
-/// that was not made the read fail and the process vanish from every listing,
-/// so any process could hide from lsof-rs by naming itself `\xff`.
-fn read_status(path: &str) -> Option<String> {
-    crate::text::read_lossy(path)
-}
-
 /// The comm in `status` bytes that are not UTF-8, as bytes: the `Name:`
 /// line's value, unescaped as [`unescape_comm`] does and a newline made `?`,
 /// so that `-c` compares, and COMMAND, `-F c` and `-E` print, the bytes the
@@ -120,6 +111,7 @@ fn raw_names(raw_command: Option<Vec<u8>>) -> Option<Box<lsof_core::RawNames>> {
         Box::new(lsof_core::RawNames {
             command: Some(command.into_boxed_slice()),
             login: None,
+            task_command: None,
         })
     })
 }
@@ -149,7 +141,7 @@ fn read_one(pid: u32) -> Option<(Process, bool)> {
         ppid: st.ppid,
         command: st.command,
         user: None,
-        files: Vec::new(),
+        files: Vec::new().into(),
         endpoint_peer: false,
         unlisted: false,
         raw_names,
@@ -191,17 +183,33 @@ pub fn tasks_of(parent: &Process) -> Vec<Process> {
             // A thread that exits mid-scan is ordinary, not an error: its
             // status is simply gone, and the task is skipped rather than
             // reported with a guessed name.
-            let st = parse_status(&read_status(&format!(
-                "/proc/{}/task/{tid}/status",
-                parent.pid
-            ))?);
+            // `status` is decoded **lossily** ([`crate::text::lossy`]): `Name:`
+            // is whatever the thread set with `prctl(PR_SET_NAME)` and need not
+            // be UTF-8; read strictly, the first byte that was not made the read
+            // fail and the task vanish, so any thread could hide from lsof-rs by
+            // naming itself `\xff`.
+            let bytes = std::fs::read(format!("/proc/{}/task/{tid}/status", parent.pid)).ok()?;
+            // The name's bytes where they are not UTF-8, as the process's
+            // are kept ([`raw_comm`]): TASKCMD prints them as the C does,
+            // `ab\xc3` and not the bytes of the U+FFFD they decode to.
+            let raw_task = std::str::from_utf8(&bytes)
+                .is_err()
+                .then(|| raw_comm(&bytes))
+                .flatten();
+            let st = parse_status(&crate::text::lossy(bytes));
             if st.state == Some('Z') {
                 return None;
+            }
+            let mut raw_names = parent.raw_names.clone();
+            if let Some(name) = raw_task {
+                raw_names.get_or_insert_with(Box::default).task_command =
+                    Some(name.into_boxed_slice());
             }
             Some(Process {
                 tid: Some(tid),
                 task_command: Some(st.command),
-                files: Vec::new(),
+                files: Vec::new().into(),
+                raw_names,
                 ..parent.clone()
             })
         })
@@ -397,6 +405,35 @@ mod tests {
         let raw = raw_names(Some(b"x\xff".to_vec())).expect("kept");
         assert_eq!(raw.command.as_deref(), Some(&b"x\xff"[..]));
         assert_eq!(raw.login, None);
+    }
+
+    /// A thread whose name is not UTF-8 is a task with that name's bytes,
+    /// beside the text it decodes to, and its process's command kept: what
+    /// TASKCMD prints (DIVERGENCES 93). Named here by writing its own
+    /// `comm`, as `prctl(PR_SET_NAME)` names it.
+    #[test]
+    #[cfg_attr(miri, ignore = "it names a live thread through /proc")]
+    fn a_thread_name_that_is_not_utf8_is_kept_as_bytes() {
+        let (named_tx, named_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let me = std::fs::read_link("/proc/thread-self").unwrap();
+            let tid: u32 = me.file_name().unwrap().to_str().unwrap().parse().unwrap();
+            std::fs::write("/proc/thread-self/comm", b"ab\xc3").unwrap();
+            named_tx.send(tid).unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = named_rx.recv().unwrap();
+        let (parent, _) = read_one(std::process::id()).expect("this process");
+        let task = tasks_of(&parent)
+            .into_iter()
+            .find(|t| t.tid == Some(tid))
+            .expect("the named thread");
+        done_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(task.task_command.as_deref(), Some("ab\u{fffd}"));
+        assert_eq!(task.task_command_bytes(), Some(&b"ab\xc3"[..]));
+        assert_eq!(task.command_bytes(), parent.command_bytes());
     }
 
     /// The comm of a `status` that is not UTF-8, as bytes: unescaped as

@@ -125,8 +125,8 @@ instant, diffed through `porting-kit/harnesses/differential/diff_run.py` with
 
 | File | Role |
 |---|---|
-| `linux_diff.py` | Stand up self-owned fixture processes — files, sockets, hostile command names and file names, mapped libraries, locks, anon inodes, threads, zombies, unreadable processes, paths to spell, and more; its docstring lists every one (`linux_diff.py --help`). Twenty-six need a capability a runner may lack (network, user and mount namespaces, a devpts mountable in one, `CAP_NET_RAW`, root or passwordless sudo, `setpriv` and `nobody` for a root runner, a `/dev/shm` mount, io_uring, `/dev/fuse`, a pty, an `strace` that can trace and delay a call, `nsenter`); without it the fixture's cases are skipped by name, not failed. One of them, FH, is a FUSE file system that does not answer (`fuse_hang.py`, in a private mount namespace per binary run), for `-S`, `-b` and `-O`; another, WRACE, renames a `+d`/`+D` entry while strace holds its `lstat` (`walk_race.py`); MT is a mount table of each run's own (`mt-wrap.sh`, which `linux_diff.py` writes, in a private mount namespace per binary run), every shape of mount the C's `readmnt()` treats apart, and AUTOFS an autofs direct mount whose daemon never answers (`autofs_hold.py`), the run failed if it triggered it; PING is ping sockets in a network namespace of its own with `ping_group_range` opened, which both binaries enter for its cases (`mt-wrap.sh`'s `ping` mode, `nsenter --net`), and the same script's `pidns` and `pidns-outer` modes run a binary as PID 1 of a PID namespace, with a procfs of its own (lsof's own rows, DIVERGENCES 166) or with the host's (164). Substitute their PIDs, paths and port into the matrix, run the kit runner under `LC_ALL=C.UTF-8` (the C's `safestrprt()` is locale-dependent; lsof-rs matches its UTF-8 behavior), tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra (a missing binary, a fixture that did not come up, the locale not installed). CI runs its `--self-test` first. |
-| `linux-matrix.toml` | The cases. Most carry `-a` (lsof ORs list options otherwise) and, where a socket can appear, `-n -P` (both binaries name hosts and ports by default; `-n -P` keeps the cases numeric and off any name server; the `names` modes are the cases about names, over a name server of the harness's own, and a case with `compare_queries` is run again to compare the queries each binary sent); the `su-*` modes are the cases about how lsof starts (a descriptor handed down, no `/dev/null` or one that cannot be written, no descriptor left for it, no `/proc`, lsof alone in a process namespace with its stdin and stderr closed, a real or an effective user who is not root: DIVERGENCES 170-172, 175; `linux_diff.py`'s `SU_MODES`); the cases about OR itself, search items, paths and option errors do not. Most file cases pass `-d ^mem` so they measure their own surface, and a few compare the `mem` rows. A case may set `cwd` (where both binaries start), `env`, and `with_stderr` (compare stderr too); `env` may carry `LSOF_DIFF_NOFILE`, a descriptor limit both binaries run under, `LSOF_DIFF_STACK`, a stack limit in KiB both run under, `LSOF_DIFF_FUSE`, FH's server mode, `LSOF_DIFF_RACE`, a WRACE scenario, or `LSOF_DIFF_MT`, `table` for MT, `autofs` for AUTOFS, `ping` for PING, `pidns` or `pidns-outer` for a PID namespace (and the other modes `mt-wrap.sh` lists): one of the last three at most, each making the case's wrapper `exec` (`--self-test` checks it). |
+| `linux_diff.py` | Stand up self-owned fixture processes — files, sockets, hostile command names and file names, mapped libraries, locks, anon inodes, threads, zombies, unreadable processes, paths to spell, and more; its docstring lists every one (`linux_diff.py --help`). Twenty-five need a capability a runner may lack (network, user and mount namespaces, a devpts mountable in one, `CAP_NET_RAW`, root or passwordless sudo, `setpriv` and `nobody` for a root runner, a `/dev/shm` mount, io_uring, `/dev/fuse`, a pty, an `strace` that can trace and delay a call, `nsenter`); without it the fixture's cases are skipped by name, not failed. One of them, FH, is a FUSE file system that does not answer (`fuse_hang.py`, in a private mount namespace per binary run), for `-S`, `-b` and `-O`; another, WRACE, renames a `+d`/`+D` entry while strace holds its `lstat` (`walk_race.py`); MT is a mount table of each run's own (`mt-wrap.sh`, which `linux_diff.py` writes, in a private mount namespace per binary run), every shape of mount the C's `readmnt()` treats apart, and AUTOFS an autofs direct mount whose daemon never answers (`autofs_hold.py`), the run failed if it triggered it; PING is ping sockets in a network namespace of its own with `ping_group_range` opened, which both binaries enter for its cases (`mt-wrap.sh`'s `ping` mode, `nsenter --net`), and the same script's `pidns` and `pidns-outer` modes run a binary as PID 1 of a PID namespace, with a procfs of its own (lsof's own rows, DIVERGENCES 166) or with the host's (164). Substitute their PIDs, paths and port into the matrix, run the kit runner under `LC_ALL=C.UTF-8` (the C's `safestrprt()` is locale-dependent; lsof-rs matches its UTF-8 behavior), tear down. Adds nothing to the comparison itself — that is the kit's. Three-way exit: 0 match/ledgered · 1 unexplained divergence · 2 infra (a missing binary, a fixture that did not come up, the locale not installed). CI runs its `--self-test` first. |
+| `linux-matrix.toml` | The cases. Most carry `-a` (lsof ORs list options otherwise) and, where a socket can appear, `-n -P` (both binaries name hosts and ports by default; `-n -P` keeps the cases numeric and off any name server; the `names` modes are the cases about names, over a name server of the harness's own, and a case with `compare_queries` is run again to compare the queries each binary sent); the `su-*` modes are the cases about how lsof starts (a descriptor handed down, no `/dev/null` or one that cannot be written, no descriptor left for it, no `/proc`, lsof alone in a process namespace with its stdin and stderr closed, a real or an effective user who is not root, something else where `/dev/null` should be, a FIFO for the mount table, a root directory lsof may not open, a pipe end or a socket handed down: DIVERGENCES 123, 170-172, 175, 177; `linux_diff.py`'s `SU_MODES`); the cases about OR itself, search items, paths and option errors do not. Most file cases pass `-d ^mem` so they measure their own surface, and a few compare the `mem` rows. A case may set `cwd` (where both binaries start), `env`, and `with_stderr` (compare stderr too); `env` may carry `LSOF_DIFF_NOFILE`, a descriptor limit both binaries run under, `LSOF_DIFF_STACK`, a stack limit in KiB both run under, `LSOF_DIFF_FUSE`, FH's server mode, `LSOF_DIFF_RACE`, a WRACE scenario, or `LSOF_DIFF_MT`, `table` for MT, `autofs` for AUTOFS, `ping` for PING, `pidns` or `pidns-outer` for a PID namespace (and the other modes `mt-wrap.sh` lists): one of the last three at most, each making the case's wrapper `exec` (`--self-test` checks it). |
 | `fuse_hang.py` | A FUSE file system over raw `/dev/fuse`, stdlib Python only, whose root answers every `stat` never (`hold`), late (`delay`) or at once (`serve`), or stops reading the device after INIT so that a `stat` is never even read (`stall`); `--hang-op readlink` holds a symlink's `readlink` instead, and `--hang-op file` the `stat` of a regular file it serves (`--file NAME=SOURCE`, which can be executed from the mount); `--hang-when PATH` answers everything until PATH exists, so a test can open or exec what it needs first. Fixture FH of `linux_diff.py` and `crates/lsof-cli/tests/bounded_calls.rs` mount it, always in a private mount namespace (`unshare -m --propagation private`) with nothing of theirs on the mount, and take it down after, which aborts the connection and frees whatever still waits on it (lsof-rs's killed helpers hold what their calls opened there until then: DIVERGENCES 123). It ends itself after `--lifetime` (900 s). Usage at its top. |
 | `autofs_hold.py` | Fixture AUTOFS's daemon: mounts an autofs direct map on its mount point with a pipe it never reads, in a session of its own, and on SIGTERM says whether anything triggered the automount (a packet in the pipe), which the case's wrapper then fails. It ends on its own after `--lifetime` (120 s from `mt-wrap.sh`), saying `timeout` and answering whatever waits on the mount, so a case that timed out, whose wrapper alone is killed, leaves no mount namespace behind. Root only; usage at its top (DIVERGENCES 110). |
 | `mount_stat_audit.py` | Which mount directories each binary `stat`s and reads through `Readlink()`, traced with `strace -ff` over 22 argument lists: the same, as many times (once each, but a directory neither can `stat`, tried again by both for each later row of it), none under `-i` alone or `-Z`, every lsof-rs `stat` of one an `O_PATH` open, and the same prefixes read through `readlink`, as a set (their counts differ both ways; the script's docstring says how) (DIVERGENCES 110). Counted in the processes each starts for those calls (the C's child, lsof-rs's helper). A second part, as root with `unshare`, lists an NFS mount in a namespace's `/proc/mounts` and compares each binary's per-file calls on a sleeper (its links and mapped files) over five argument lists: the same in each's child, none in lsof itself, none at all under `-b`, and none in lsof-rs's helper without the line (DIVERGENCES 124). Skipped, saying so, without an strace that can trace. SIGTERM ends it as its end does, with its sleeper and work directory gone. `--self-test` checks its parser, its counting, and that. |
@@ -153,3 +153,82 @@ DIVERGE(ledgered), 0 unexplained. Before it was a gate, doing this by hand
 found every fidelity bug in phases L0 and L1 — and on its first fixture it found
 two more (the `0t0` offset cell for devices and FIFOs; `pipe` in NAME), fixed in
 the same PR. It runs on every Linux CI push as a hard gate.
+
+## FreeBSD — the side-by-side (`freebsd-check.sh`)
+
+There is no FreeBSD runner in `.github/workflows`, and Cirrus CI is not
+connected to this repository, so FreeBSD has no differential that gates a
+change. What it has is a script a person runs on a FreeBSD host, which builds
+both binaries from one tree and prints what each says for the same command
+lines, as a normal user and as root:
+
+```sh
+# as root: the build tools, and the kernel sources the C compiles against
+sh lsof-rs/differential/freebsd-check.sh install
+sh lsof-rs/differential/freebsd-check.sh sources
+# as a normal user: the C (autotools) and lsof-rs, and lsof-rs's tests
+SRC=$HOME/lsof sh lsof-rs/differential/freebsd-check.sh build
+sh lsof-rs/differential/freebsd-check.sh compare
+# as root: the same comparisons, system-wide
+sh lsof-rs/differential/freebsd-check.sh compare
+```
+
+`sources` is there because the C's FreeBSD dialect includes kernel headers
+(`-I/usr/src/sys`), which a release image may not carry: it takes
+`usr/src/sys` out of the release's `src.txz`, or clones the release branch.
+`build` runs `cargo test -p lsof-backend-freebsd -p lsof-core -p lsof-cli
+--no-fail-fast`, so one failing suite does not hide the next. `compare`
+takes `LSOF_C` and `LSOF_RS` for binaries built elsewhere and `DIR` for its
+work directory, and writes `lsof-rs-freebsd-compare-<user>.txt` where it is
+run. Every lsof it runs has `-n -P`: no name is looked up and nothing leaves
+the host (DIVERGENCES 185 is what the two print without them).
+
+Reading the result. Each comparison prints `=== lsof ARGS`, both exit
+statuses and line counts, and then `SAME` or a unified diff of the C's output
+(`-`) against lsof-rs's (`+`), standard output and standard error together.
+Six forms of comparison, because some output cannot be equal:
+
+| Form | What is compared | Why |
+|---|---|---|
+| `run` | every byte | the default |
+| `runu` | every byte but the C's usage block and lsof-rs's `Try 'lsof -h' for usage.` | an option error: DIVERGENCES 114 |
+| `runo` | every row but those of processes named `lsof`, which are counted, and of the `timeout` each run is started under | a listing that holds the lsof making it: its PID, path and output file are its own |
+| `runof` | as `runo`, for `-F` output that holds `c`: every process block but those of `lsof` and `timeout` | a listing of every process in `-F` form (row 181's) |
+| `runj` | every byte but `"lsof_version"` | JSON: DIVERGENCES 91 |
+| `runjs` | as `runj`, and without the `"name"` lsof-rs gives an Internet socket's object (they are counted) | JSON that holds such sockets: the C's object has no `name`, DIVERGENCES 134 |
+| `runs` | lsof's own rows, its PID and its output file's name and inode masked | the lsof that lists, compared with itself |
+
+The fixtures are its own: a `sleep`, a `tail -f` (a kqueue), an `nc`
+listener, and two programs it compiles with the base system's `cc`, one
+holding 24 sockets of every kind the dialect names differently (TCP and UDP,
+IPv4, IPv6 and v4-mapped, unbound, bound, listening, connected, accepted,
+shut down; raw, routing, UDP-Lite) and one with four threads. (Row 180's
+33 sockets were a larger fixture of the measurement that row records, not
+this one.) Without a compiler those comparisons are skipped, and the file
+says so. Every run of either binary is made under `ulimit -v` (2 GiB) and
+`timeout` (60 s; `LSOF_VMEM_KB`, `LSOF_TIMEOUT`): the C's `+M` waits on a
+portmapper that is not running, and one run of it grew past 4 GB on a test
+host. Each run is made in a subshell of its own, its standard input an
+empty file of the work directory (so that neither the script's own shell
+nor a detached run's `/dev/null` shows in a listing). The forms of row 181 that list every process (`-U -s TCP:LISTEN` and
+its like) are `runof`'s: an exclusion `-c ^lsof` would not do, as the C
+then exits 1 (its `-c ^` is a search item: DIVERGENCES'
+`search-c-negated-is-a-search-item-in-the-c`).
+
+What is expected not to be `SAME`, on a tree where nothing is wrong:
+
+- the first block, which is no comparison: the C's device cache warnings and
+  its personal cache path, shown once (lsof-rs keeps no cache: 148);
+- `lsof -n -P /dev/null`: one row more in lsof-rs's, its helper's descriptor
+  2 (144);
+- `lsof -D ?`, printed for both and not compared (148);
+- `lsof -n -P` under `run`: the listing lsof's own rows (the `runo` form of
+  the same command line follows it);
+- the timing of `+d` over 50,000 files, in whole seconds, printed and not
+  compared.
+
+Anything else is a finding: fix it, or give it a DIVERGENCES row. The file
+ends `=== summary: N comparisons the same, M with a difference`. The runs
+made so far are recorded in DIVERGENCES 140 (2026-11-21: FreeBSD
+14.5-RELEASE amd64, UFS). `.cirrus.yml`'s `lsof_rs_task` calls the same
+script, for the day Cirrus CI is connected.

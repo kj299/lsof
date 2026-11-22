@@ -1,0 +1,684 @@
+# Mutants for the first FreeBSD run beside the C (2026-11-21, FreeBSD
+# 14.5-RELEASE amd64): DIVERGENCES 141 (tasks), 148 (-D), 180 (the ends of an
+# Internet socket), 181 (-s with -i), 182 (when the mount table is read), 183
+# (FreeBSD's option letters), and readvfs()'s first pass. Every rule was
+# measured against the C on FreeBSD; every gate is a unit suite that runs on
+# Linux: the FreeBSD backend's pure modules (cfg(test) on any Unix),
+# lsof-core's model, selection and renderers, lsof-cli's parser (whose
+# FreeBSD option set a test turns on) and lsof's own unit tests. One per
+# rule, bound and branch the change added.
+#
+#   cd lsof-rs && python3 ../porting-kit/harnesses/port-mutation/mutate_port.py --first-kill mutants/freebsd-run1.toml
+#
+# Not mutated, and why: the lines that compile on FreeBSD alone (the
+# backend's gather: KERN_PROC_ALL under -K, the rows read once a process and
+# given to each of its threads, the set of NFS devices; main.rs's -D ?
+# report; kinfo_proc's measured ki_tid offsets, which no Linux test can
+# check and the backend's live test on FreeBSD does:
+# `under_dash_k_this_processs_threads_are_its_entries`, with
+# crates/lsof-cli/tests/freebsd.rs for the binary).
+
+[run]
+dir = ".."
+build = [["cargo", "build", "-p", "lsof-backend-freebsd", "-p", "lsof-core", "-p", "lsof-cli"]]
+
+[[run.gate]]
+name = "unit-bsd"
+cmd = ["cargo", "test", "-p", "lsof-backend-freebsd", "--lib"]
+timeout = 900
+
+[[run.gate]]
+name = "unit-cli"
+cmd = ["cargo", "test", "-p", "lsof-cli", "--lib", "--bin", "lsof"]
+timeout = 900
+
+[[run.gate]]
+name = "unit-core"
+cmd = ["cargo", "test", "-p", "lsof-core", "--lib", "--test", "golden"]
+timeout = 900
+
+[[mutant]]
+name = "v4-foreign-end-tested"
+rule = "an IPv4 socket's foreign end is entered whatever it holds (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let entered = domain == sock::AF_INET || !peer.ip().is_unspecified() || peer.port() != 0;"
+new = "let entered = !peer.ip().is_unspecified() || peer.port() != 0;"
+
+[[mutant]]
+name = "v6-foreign-end-always"
+rule = "an IPv6 socket's foreign end is entered only when it is one (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let entered = domain == sock::AF_INET || !peer.ip().is_unspecified() || peer.port() != 0;"
+new = "let entered = true;"
+
+[[mutant]]
+name = "v6-foreign-end-needs-an-address"
+rule = "an IPv6 foreign end of :: with a port is an end (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let entered = domain == sock::AF_INET || !peer.ip().is_unspecified() || peer.port() != 0;"
+new = "let entered = domain == sock::AF_INET || !peer.ip().is_unspecified();"
+
+[[mutant]]
+name = "v6-foreign-end-needs-a-port"
+rule = "an IPv6 foreign end with an address and no port is an end (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let entered = domain == sock::AF_INET || !peer.ip().is_unspecified() || peer.port() != 0;"
+new = "let entered = domain == sock::AF_INET || peer.port() != 0;"
+
+[[mutant]]
+name = "mapped-ends-stay-ipv6"
+rule = "a mapped end makes both ends IPv4 (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if !(mapped(&local) || remote.as_ref().is_some_and(mapped)) {"
+new = "if true {"
+
+[[mutant]]
+name = "mapped-by-the-local-end-alone"
+rule = "a mapped foreign end makes both ends IPv4 too (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if !(mapped(&local) || remote.as_ref().is_some_and(mapped)) {"
+new = "if !mapped(&local) {"
+
+[[mutant]]
+name = "mapped-by-the-foreign-end-alone"
+rule = "a mapped local end makes it IPv4 with no foreign end (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if !(mapped(&local) || remote.as_ref().is_some_and(mapped)) {"
+new = "if !remote.as_ref().is_some_and(mapped) {"
+
+[[mutant]]
+name = "mapped-end-first-four-bytes"
+rule = "IPv6_2_IPv4() is an end's last four bytes (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "IpAddr::V4(Ipv4Addr::new(o[12], o[13], o[14], o[15])),"
+new = "IpAddr::V4(Ipv4Addr::new(o[0], o[1], o[2], o[3])),"
+
+[[mutant]]
+name = "short-record-not-zeros"
+rule = "a sockaddr the record cannot hold reads as zeros (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        SocketAddr::new(ip, 0)\n    };\n    let local"
+new = "        SocketAddr::new(ip, 1)\n    };\n    let local"
+
+[[mutant]]
+name = "short-record-zeros-are-ipv4"
+rule = "the zeros are of the socket's family (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "let ip = if domain == sock::AF_INET {\n            IpAddr::V4(Ipv4Addr::UNSPECIFIED)"
+new = "let ip = if true {\n            IpAddr::V4(Ipv4Addr::UNSPECIFIED)"
+
+[[mutant]]
+name = "name-not-printinaddrs"
+rule = "NAME is printinaddr()'s text of the ends entered: *:* for an unspecified end (180)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "f.name = lsof_core::sockname::SocketNames::numeric(&info);"
+new = "f.name = info.display_name(false, false);"
+
+[[mutant]]
+name = "freebsd-ends-filtered"
+rule = "a FreeBSD row's ends are the ones entered, unspecified or not (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "        if self.is_bsd() {\n            return [self.local, self.remote];\n        }"
+new = "        if false {\n            return [self.local, self.remote];\n        }"
+
+[[mutant]]
+name = "linux-zero-end-is-an-end"
+rule = "elsewhere an end of 0.0.0.0:0 is none (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "let end = |a: Option<SocketAddr>| a.filter(|a| !is_unspecified(a));"
+new = "let end = |a: Option<SocketAddr>| a;"
+
+[[mutant]]
+name = "any-tcp-info-is-freebsds"
+rule = "a FreeBSD row is one with that dialect's record, not any TCP information (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = "self.tcp.is_some_and(|t| t.bsd.is_some())"
+new = "self.tcp.is_some()"
+
+[[mutant]]
+name = "c-ends-filter-freebsds"
+rule = "printinaddr()'s ends are the ones entered (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/sockname.rs"
+old = "let [local, remote] = info.entered_ends();"
+new = "let [local, remote] = info\n        .entered_ends()\n        .map(|a| a.filter(|a| !(a.ip().is_unspecified() && a.port() == 0)));"
+
+[[mutant]]
+name = "spec-family-by-type-on-freebsd"
+rule = "a specification's family is the one the ends were entered in (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "if !f.is_internet() || !(bsd || family_matches(self.family, f)) {"
+new = "if !f.is_internet() || !family_matches(self.family, f) {"
+
+[[mutant]]
+name = "spec-family-not-asked-of-an-end"
+rule = "a specification of the other family matches no end (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "if bsd && self.family.is_some_and(|fam| (fam == 6) != a.is_ipv6()) {"
+new = "if false {"
+
+[[mutant]]
+name = "spec-family-asked-of-every-row"
+rule = "the end's family is asked of a FreeBSD row alone (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "if bsd && self.family.is_some_and(|fam| (fam == 6) != a.is_ipv6()) {"
+new = "if self.family.is_some_and(|fam| (fam == 6) != a.is_ipv6()) {"
+
+[[mutant]]
+name = "endless-socket-matches-a-protocol"
+rule = "a socket with no end entered is matched by no specification (180)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "if !bsd && self.host.is_none() && self.ports.is_empty() {"
+new = "if self.host.is_none() && self.ports.is_empty() {"
+
+[[mutant]]
+name = "state-inclusion-leaves-bare-i"
+rule = "with a state inclusion the bare -i selects the TCP sockets in it alone (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "Some(sock) if sock.is_bsd() && self.includes_states() => {"
+new = "Some(sock) if false && sock.is_bsd() && self.includes_states() => {"
+
+[[mutant]]
+name = "state-inclusion-rule-for-every-row"
+rule = "the rule is FreeBSD's rows' (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "Some(sock) if sock.is_bsd() && self.includes_states() => {"
+new = "Some(_sock @ sock) if self.includes_states() => {"
+
+[[mutant]]
+name = "state-exclusion-alone-is-the-rule-too"
+rule = "an exclusion alone leaves the bare -i as it was (181)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "Some(sock) if sock.is_bsd() && self.includes_states() => {"
+new = "Some(sock) if sock.is_bsd() && self.state_filter.is_some() => {"
+
+[[mutant]]
+name = "state-inclusion-selects-without-i"
+rule = "the bare -i's arm selects by the state only where -i is bare; without it the state selects only in a process the C reads (181, re-anchored 2026-11-21 for the OR rule)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/selection.rs"
+old = "                self.inet.bare() && self.state_selects(f)"
+new = "                self.state_selects(f)"
+
+[[mutant]]
+name = "freebsd-reads-the-table-first"
+rule = "FreeBSD reads no mount table before it lists (182)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = "    !freebsd && sel.needs_mount_table()"
+new = "    sel.needs_mount_table()"
+
+[[mutant]]
+name = "no-table-before-listing-anywhere"
+rule = "elsewhere the Linux C's rule holds (182)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = "    !freebsd && sel.needs_mount_table()"
+new = "    !freebsd && false"
+
+[[mutant]]
+name = "typed-nfs-devices-without-dash-n"
+rule = "a backend's NFS devices are taken under -N alone (182)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = "devices.filter(|_| sel.nfs_only).map(|devices| Selection {"
+new = "devices.map(|devices| Selection {"
+
+[[mutant]]
+name = "typed-nfs-devices-dropped"
+rule = "the devices a backend typed replace the selection's (182)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/main.rs"
+old = "        nfs_devices: devices,\n        ..sel.clone()"
+new = "        ..sel.clone()"
+
+[[mutant]]
+name = "nfs-file-untold"
+rule = "a row typed NFS tells its device (182)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        env.nfs_file(dev);\n    }\n    let rdev"
+new = "        let _ = dev;\n    }\n    let rdev"
+
+[[mutant]]
+name = "every-file-is-nfs"
+rule = "only a row typed NFS tells its device (182)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if let (Ntype::Nfs, Some(dev)) = (ntype, dev) {"
+new = "if let (_, Some(dev)) = (ntype, dev) {"
+
+[[mutant]]
+name = "source-read-only-as-a-path"
+rule = "every mount source goes through Readlink() and stat, a path or not (182)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/mounts.rs"
+old = "    if exempt.is_some_and(|e| e.plus) {\n        return (Some(raw_os.to_os_string()), false);\n    }"
+new = "    if exempt.is_some_and(|e| e.plus) || raw.first() != Some(&b'/') {\n        return (Some(raw_os.to_os_string()), false);\n    }"
+
+[[mutant]]
+name = "assumed-device-zero-extended"
+rule = "an assumed device keeps the sign of f_fsid.val[0] (144)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/mounts.rs"
+old = "let dev = i64::from(m.fsid0 as i32) as u64;"
+new = "let dev = u64::from(m.fsid0);"
+
+[[mutant]]
+name = "freebsd-table-has-nfs"
+rule = "FreeBSD's table notes no HasNFS (182)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/mounts.rs"
+old = "        let kind = if m.fstypename.eq_ignore_ascii_case(b\"nfs\") {\n            MountKind::Nfs"
+new = "        let kind = if m.fstypename.eq_ignore_ascii_case(b\"nfs\") {\n            table.has_nfs = 2;\n            MountKind::Nfs"
+
+[[mutant]]
+name = "selinet-is-any-dash-i"
+rule = "a pipe is unprocessed under Selinet, not under any -i (182)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            inet: sel.inet_only(),"
+new = "            inet: sel.inet.enabled,"
+
+[[mutant]]
+name = "file-struct-not-asked"
+rule = "the file structure is read where the run asks (142)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            file_struct: sel.file_struct,\n        }\n    }"
+new = "            file_struct: false,\n        }\n    }"
+
+[[mutant]]
+name = "precache-skips-specials"
+rule = "the first pass looks up every special (dproc.c:238-244)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if k.fd() < 0 || matches!(k.kind(), kf::TYPE_FIFO | kf::TYPE_VNODE) {"
+new = "if matches!(k.kind(), kf::TYPE_FIFO | kf::TYPE_VNODE) {"
+
+[[mutant]]
+name = "precache-skips-fifos"
+rule = "the first pass looks up a FIFO"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if k.fd() < 0 || matches!(k.kind(), kf::TYPE_FIFO | kf::TYPE_VNODE) {"
+new = "if k.fd() < 0 || matches!(k.kind(), kf::TYPE_VNODE) {"
+
+[[mutant]]
+name = "precache-skips-vnodes"
+rule = "the first pass looks up a vnode, so a file with no path is named by a later file's file system"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if k.fd() < 0 || matches!(k.kind(), kf::TYPE_FIFO | kf::TYPE_VNODE) {"
+new = "if k.fd() < 0 || matches!(k.kind(), kf::TYPE_FIFO) {"
+
+[[mutant]]
+name = "precache-looks-up-every-record"
+rule = "the first pass looks up vnodes, FIFOs and specials alone"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "if k.fd() < 0 || matches!(k.kind(), kf::TYPE_FIFO | kf::TYPE_VNODE) {"
+new = "if true {"
+
+[[mutant]]
+name = "readvfs-searches-for-no-fsid"
+rule = "readvfs() searches by fsid only when there is one"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        if fsid != VNOVAL {\n            if let Some(v) = self.0.borrow().iter().find(|v| v.fsid == fsid) {"
+new = "        if true {\n            if let Some(v) = self.0.borrow().iter().find(|v| v.fsid == fsid) {"
+
+[[mutant]]
+name = "readvfs-statfs-of-no-path"
+rule = "readvfs() asks nothing of a record with no path"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        if path.is_empty() {\n            return None;\n        }\n        let m = statfs(path)?;"
+new = "        let m = statfs(path)?;"
+
+[[mutant]]
+name = "readvfs-entry-by-source-alone"
+rule = "an entry is the one of both names: the source and the directory"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = ".find(|v| v.fsname == m.mntfrom && v.dir == m.mnton)"
+new = ".find(|v| v.fsname == m.mntfrom)"
+
+[[mutant]]
+name = "readvfs-entry-by-directory-alone"
+rule = "an entry is the one of both names: the directory and the source"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = ".find(|v| v.fsname == m.mntfrom && v.dir == m.mnton)"
+new = ".find(|v| v.dir == m.mnton)"
+
+[[mutant]]
+name = "readvfs-type-name-uncut"
+rule = "a type's name is cut to MFSNAMELEN - 1 bytes"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "        typnm.truncate(15);\n"
+new = ""
+
+[[mutant]]
+name = "readvfs-entry-without-its-fsid"
+rule = "a new entry is recorded under the fsid asked with"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "            typnm,\n            fsid,\n        };\n        list.push(v.clone());"
+new = "            typnm,\n            fsid: VNOVAL,\n        };\n        list.push(v.clone());"
+
+[[mutant]]
+name = "task-of-a-record-with-no-state"
+rule = "a record with no state is passed by"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = ".filter(|k| k.stat != 0 && k.stat != SZOMB)"
+new = ".filter(|k| k.stat != SZOMB)"
+
+[[mutant]]
+name = "task-of-a-zombie"
+rule = "a zombie's record is passed by"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = ".filter(|k| k.stat != 0 && k.stat != SZOMB)"
+new = ".filter(|k| k.stat != 0)"
+
+[[mutant]]
+name = "tid-without-dash-k"
+rule = "a process has a TID under -K alone (141)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "tid: u32::try_from(k.tid).ok().filter(|&t| tasks && t != 0),"
+new = "tid: u32::try_from(k.tid).ok().filter(|&t| t != 0),"
+
+[[mutant]]
+name = "tid-zero-is-a-task"
+rule = "a TID of 0 is no task's (141)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "tid: u32::try_from(k.tid).ok().filter(|&t| tasks && t != 0),"
+new = "tid: u32::try_from(k.tid).ok().filter(|_| tasks),"
+
+[[mutant]]
+name = "threads-in-the-tables-order"
+rule = "a process's threads are listed in TID order (141)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "procs.sort_by_key(|p| (p.pid, p.tid));"
+new = "procs.sort_by_key(|p| p.pid);"
+
+[[mutant]]
+name = "threads-are-one-entry"
+rule = "each thread is an entry (141)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "procs.dedup_by_key(|p| (p.pid, p.tid));"
+new = "procs.dedup_by_key(|p| p.pid);"
+
+[[mutant]]
+name = "second-record-kept"
+rule = "a second record of one entry is not kept (141)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/rows.rs"
+old = "    procs.dedup_by_key(|p| (p.pid, p.tid));\n"
+new = ""
+
+[[mutant]]
+name = "tid-read-from-the-pid"
+rule = "the TID is ki_tid (141)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/kinfo.rs"
+old = "tid: i32_at(rec, l.tid).unwrap_or(0),"
+new = "tid: i32_at(rec, l.pid).unwrap_or(0),"
+
+[[mutant]]
+name = "taskcmd-with-every-tid"
+rule = "TASKCMD is a column only where an entry has a task command (141)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = "let show_task_cmd = procs.iter().any(|p| p.task_command.is_some());"
+new = "let show_task_cmd = show_tasks;"
+
+[[mutant]]
+name = "no-taskcmd-column"
+rule = "TASKCMD is a column where an entry has a task command (141)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = "let show_task_cmd = procs.iter().any(|p| p.task_command.is_some());"
+new = "let show_task_cmd = false;"
+
+[[mutant]]
+name = "dash-d-is-the-cache-control-everywhere"
+rule = "-D is the C's device cache control on FreeBSD alone (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'D' if !plus && freebsd_options() => {"
+new = "'D' if !plus => {"
+
+[[mutant]]
+name = "dash-d-never-the-cache-control"
+rule = "FreeBSD's -D is read as ctrl_dcache() reads it (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'D' if !plus && freebsd_options() => {"
+new = "'D' if !plus && freebsd_options() && false => {"
+
+[[mutant]]
+name = "dash-d-question-lists"
+rule = "-D ? is a report, and nothing is listed (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "Ok(DeviceCache::Report) => reports.device_cache = true,"
+new = "Ok(DeviceCache::Report) => {}"
+
+[[mutant]]
+name = "dash-d-error-swallowed"
+rule = "a -D value the C refuses is its error (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "                        Err(line) => early.line(&line),\n                    }\n                    j = chars.len();\n                    continue;\n                }\n                // FreeBSD's C has `-k`"
+new = "                        Err(_) => {}\n                    }\n                    j = chars.len();\n                    continue;\n                }\n                // FreeBSD's C has `-k`"
+
+[[mutant]]
+name = "dash-d-report-is-no-report"
+rule = "-D ? alone ends the run as -h does (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "self.help || self.field_help || self.version || self.device_cache"
+new = "self.help || self.field_help || self.version"
+
+[[mutant]]
+name = "dash-d-no-value-accepted"
+rule = "-D with no value is `no device cache option control string` (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        return Err(\"no device cache option control string\".to_string());"
+new = "        return Ok(DeviceCache::Ignore);"
+
+[[mutant]]
+name = "dash-d-question-takes-more"
+rule = "nothing may follow -D ? (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        (Some(b'?'), _) => Err(\"nothing should follow -D?\".to_string()),"
+new = "        (Some(b'?'), _) => Ok(DeviceCache::Report),"
+
+[[mutant]]
+name = "dash-d-i-takes-more"
+rule = "-D i is `i` alone (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        (Some(b'i' | b'I'), 1) => Ok(DeviceCache::Ignore),"
+new = "        (Some(b'i' | b'I'), _) => Ok(DeviceCache::Ignore),"
+
+[[mutant]]
+name = "dash-d-capital-i-refused"
+rule = "-D I is -D i (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        (Some(b'i' | b'I'), 1) => Ok(DeviceCache::Ignore),"
+new = "        (Some(b'i'), 1) => Ok(DeviceCache::Ignore),"
+
+[[mutant]]
+name = "dash-d-b-alone"
+rule = "-D b takes a path after it (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        (Some(b'b' | b'B'), _) => Ok(DeviceCache::Build),"
+new = "        (Some(b'b' | b'B'), 1) => Ok(DeviceCache::Build),"
+
+[[mutant]]
+name = "dash-d-r-refused"
+rule = "-D r is accepted (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        (Some(b'r' | b'R'), _) => Ok(DeviceCache::Read),"
+new = "        (Some(b'R'), _) => Ok(DeviceCache::Read),"
+
+[[mutant]]
+name = "dash-d-u-refused"
+rule = "-D u is accepted (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        (Some(b'u' | b'U'), _) => Ok(DeviceCache::Update),"
+new = "        (Some(b'U'), _) => Ok(DeviceCache::Update),"
+
+[[mutant]]
+name = "dash-d-unknown-unescaped"
+rule = "an unknown -D value is quoted escaped (148, 122)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "        _ => Err(format!(\"unknown -D option: {}\", shown_bytes(value))),"
+new = "        _ => Err(format!(\"unknown -D option: {}\", String::from_utf8_lossy(value))),"
+
+[[mutant]]
+name = "device-cache-report-names-a-path"
+rule = "-D ? reports no path: none is read and none written (148)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "pub const DEVICE_CACHE_REPORT: &str = \"Device cache file read-only paths:\n    none\n"
+new = "pub const DEVICE_CACHE_REPORT: &str = \"Device cache file read-only paths:\n    ~/.lsof\n"
+
+[[mutant]]
+name = "freebsd-has-dash-x"
+rule = "-X is an illegal option character on FreeBSD (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'X' if !freebsd_options() => sel.skip_inet_tables = !sel.skip_inet_tables,"
+new = "'X' => sel.skip_inet_tables = !sel.skip_inet_tables,"
+
+[[mutant]]
+name = "freebsd-has-dash-z"
+rule = "-Z is an illegal option character on FreeBSD (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'Z' if !freebsd_options() => {"
+new = "'Z' => {"
+
+[[mutant]]
+name = "freebsd-has-dash-e"
+rule = "-e and +e are illegal option characters on FreeBSD (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'e' if !freebsd_options() => {"
+new = "'e' => {"
+
+[[mutant]]
+name = "freebsd-has-dash-big-e"
+rule = "-E and +E are illegal option characters on FreeBSD (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'E' if !freebsd_options() => {"
+new = "'E' => {"
+
+[[mutant]]
+name = "dash-m-everywhere"
+rule = "+M and -M are FreeBSD's alone (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'M' if freebsd_options() => {}"
+new = "'M' => {}"
+
+[[mutant]]
+name = "freebsd-lacks-dash-m"
+rule = "+M and -M are read on FreeBSD (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "'M' if freebsd_options() => {}"
+new = "'M' if freebsd_options() => early.illegal('M'),"
+
+[[mutant]]
+name = "freebsd-knows-udp-states"
+rule = "-s UDP: is an unknown protocol on FreeBSD (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "Some(\"udp:\") if !freebsd_options() => \"UDP\","
+new = "Some(\"udp:\") => \"UDP\","
+
+[[mutant]]
+name = "udp-states-unknown-everywhere"
+rule = "-s UDP: is read elsewhere (183)"
+[[mutant.edit]]
+file = "crates/lsof-cli/src/args.rs"
+old = "Some(\"udp:\") if !freebsd_options() => \"UDP\","
+new = "Some(\"udp:\") if freebsd_options() => \"UDP\","
+
+# The helper's descriptor 2 (DIVERGENCES 144): /dev/null as lsof opens it,
+# for reading and writing, so that a FIFO in its place holds no start.
+
+[[mutant]]
+name = "fd2-open-for-writing-alone"
+rule = "the helper's /dev/null is opened for reading too: an open for writing alone waits on a FIFO (144)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    let stderr = std::fs::OpenOptions::new()\n        .read(true)\n        .write(true)\n        .open(null)?;"
+new = "    let stderr = std::fs::OpenOptions::new()\n        .write(true)\n        .open(null)?;"
+
+
+[[mutant]]
+name = "fd2-open-for-reading-alone"
+rule = "the helper's /dev/null is opened for writing too, as the C opens it (144)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "    let stderr = std::fs::OpenOptions::new()\n        .read(true)\n        .write(true)\n        .open(null)?;"
+new = "    let stderr = std::fs::OpenOptions::new()\n        .read(true)\n        .open(null)?;"
+
+
+[[mutant]]
+name = "fd2-not-the-file-opened"
+rule = "the file lsof opened is the one handed over as descriptor 2 (144)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        .stdout(Stdio::piped())\n        .stderr(stderr);"
+new = "        .stdout(Stdio::piped())\n        .stderr(Stdio::null());"
+
+
+[[mutant]]
+name = "fd2-any-name-is-dev-null"
+rule = "the file opened is the one named, and one that cannot be opened is no helper (144)"
+[[mutant.edit]]
+file = "crates/lsof-backend-freebsd/src/safefs.rs"
+old = "        .write(true)\n        .open(null)?;"
+new = "        .write(true)\n        .open(\"/dev/null\")?;"

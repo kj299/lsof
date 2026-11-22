@@ -9,7 +9,7 @@
 //! for what DIVERGENCES 38 records: a back-reference glibc takes is refused,
 //! and a word operator beside a byte that is no character is not asked.
 
-use lsof_core::posix_regex::CommandRegex;
+use lsof_core::posix_regex::{CommandRegex, Dialect};
 
 const TABLE: &str = include_str!("posix_regex_glibc.txt");
 
@@ -48,13 +48,13 @@ fn every_expression_is_read_as_glibc_reads_it() {
         // and lsof-rs's own, which answers for the rest.
         for own in [false, true] {
             let regex = if own {
-                CommandRegex::new_own(&expression, extended, icase)
+                CommandRegex::new_own_in(Dialect::Glibc, &expression, extended, icase)
             } else {
-                CommandRegex::new(&expression, extended, icase)
+                CommandRegex::new_in(Dialect::Glibc, &expression, extended, icase)
             };
             if let Some(text) = want.strip_prefix('!') {
                 assert_eq!(
-                    regex.as_ref().err().map(|e| e.text()),
+                    regex.as_ref().err().map(|e| e.text_in(Dialect::Glibc)),
                     Some(text),
                     "{shown:?} {flags}"
                 );
@@ -122,7 +122,7 @@ fn a_back_reference_matches_where_some_binding_of_the_groups_does() {
         };
         let expression = unhex(expression);
         let shown = String::from_utf8_lossy(&expression).into_owned();
-        let regex = CommandRegex::new(&expression, !flags.contains('b'), false)
+        let regex = CommandRegex::new_in(Dialect::Glibc, &expression, !flags.contains('b'), false)
             .unwrap_or_else(|e| panic!("{shown:?} {flags}: {e:?}"));
         cases += 1;
         missed += usize::from(every != glibc);
@@ -157,5 +157,91 @@ fn a_back_reference_matches_where_some_binding_of_the_groups_does() {
     if !cfg!(miri) {
         assert_eq!((cases, missed), (500, 10));
         assert!(asked > 25_000, "{asked}");
+    }
+}
+
+const FREEBSD: &str = include_str!("posix_regex_freebsd.txt");
+
+/// The same reading by FreeBSD's grammar (`Dialect::FreeBsd`, what lsof-rs
+/// uses on FreeBSD) against what FreeBSD 14.5's libc said of glibc's 1,500
+/// expressions, of 665 more of its own grammar and of 543 for `REG_ICASE`
+/// and the escapes, each against 116 commands, under `LC_CTYPE=C.UTF-8`
+/// (DIVERGENCES 183). Every answer is FreeBSD's: what it refuses, in its
+/// words, and what it matches, but a word operator's beside a character
+/// past ASCII.
+#[test]
+fn every_expression_is_read_as_freebsds_libc_reads_it() {
+    let mut lines = FREEBSD.lines().filter(|l| !l.starts_with('#'));
+    let commands: Vec<Vec<u8>> = lines
+        .next()
+        .and_then(|l| l.strip_prefix("H "))
+        .expect("the commands")
+        .split(' ')
+        .map(unhex)
+        .collect();
+    assert_eq!(commands.len(), 116);
+    let step = if cfg!(miri) { 300 } else { 1 };
+    let (mut cases, mut refused, mut skipped) = (0, 0, 0);
+    let mut wrong: Vec<String> = Vec::new();
+    for line in lines.step_by(step) {
+        let mut fields = line.splitn(3, ' ');
+        let expression = unhex(fields.next().expect("an expression"));
+        let flags = fields.next().expect("flags");
+        let want = fields.next().expect("FreeBSD's answer");
+        let shown = String::from_utf8_lossy(&expression).into_owned();
+        cases += 1;
+        let (extended, icase) = (!flags.contains('b'), flags.contains('i'));
+        for own in [false, true] {
+            let regex = if own {
+                CommandRegex::new_own_in(Dialect::FreeBsd, &expression, extended, icase)
+            } else {
+                CommandRegex::new_in(Dialect::FreeBsd, &expression, extended, icase)
+            };
+            if let Some(text) = want.strip_prefix('!') {
+                let said = regex.as_ref().err().map(|e| e.text_in(Dialect::FreeBsd));
+                if said != Some(text) {
+                    wrong.push(format!("{shown:?} {flags}: {text:?}, lsof-rs {said:?}"));
+                }
+                refused += usize::from(!own);
+                continue;
+            }
+            let regex = match regex {
+                Ok(regex) => regex,
+                Err(e) => {
+                    wrong.push(format!(
+                        "{shown:?} {flags}: FreeBSD takes it, lsof-rs says {e:?}"
+                    ));
+                    continue;
+                }
+            };
+            // Beside a character past ASCII one thing is not FreeBSD's
+            // (DIVERGENCES 183): a word operator, which its matcher decides
+            // by the low byte of the character (`ISWORD((uch)c)`).
+            let word_operator = [&b"\\<"[..], b"\\>", b"[:<:]", b"[:>:]"]
+                .iter()
+                .any(|op| expression.windows(op.len()).any(|w| w == *op));
+            for (command, want) in commands.iter().zip(want.chars()) {
+                if word_operator && !command.is_ascii() {
+                    skipped += usize::from(!own);
+                    continue;
+                }
+                if regex.is_match(command) != (want == '1') {
+                    wrong.push(format!(
+                        "{shown:?} {flags} against {:?} (own engine: {own}): FreeBSD {want}",
+                        String::from_utf8_lossy(command)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+    if !cfg!(miri) {
+        assert_eq!((cases, refused), (2708, 946));
+        assert_eq!(skipped, 2000, "the answers not asked");
     }
 }

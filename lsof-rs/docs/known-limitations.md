@@ -286,7 +286,8 @@ Windows** lsof-rs names both by default as before (hosts by reverse DNS
 through `GetNameInfoW`, ports from a built-in table of common services;
 bounded at 2 s, each distinct address once: see
 [Sockets](#on-windows-socket-host-names-cost-up-to-2-s-per-distinct-address)),
-and `-n`/`-P`/`+n`/`+P` read the same flags. On FreeBSD nothing is named.
+and `-n`/`-P`/`+n`/`+P` read the same flags. On FreeBSD nothing is named
+(DIVERGENCES 185: measured, the C names both there).
 
 What lsof-rs does resolve, on every platform, is a name it is **given**: `-i
 @localhost` and `-i :http` are looked up where the option is read, as the C
@@ -301,15 +302,64 @@ file holds cost none. A service name comes from `/etc/services`.
 The rows of [`../DIVERGENCES.md`](../DIVERGENCES.md) a user is most likely to
 meet. Each number is a row there, with the measurement behind it.
 
-- **FreeBSD** (140-147): every row is the C dialect's rule as read from its
-  source; none has been run on FreeBSD. `-K` lists no task, where the
-  autotools build of the C lists threads (141); `statfs(2)` of a vnode's path
-  is not bounded by `-S`, as the C's is not (143). A bounded call's helper
-  greets with the build it is, and a run whose binary was replaced since it
-  started ends `can't fork`, where the C's forked child cannot differ (144).
-  The `/dev` walk stops past 4,096 directories or 65,536 character devices,
-  with a warning, where the C's has no bound; a device cache file (`-D`) is
-  neither read nor written (146, 148).
+- **FreeBSD** (140-148, 180-183, 185): measured beside the C on one host,
+  FreeBSD 14.5-RELEASE amd64 with UFS (2026-11-21, by hand with
+  `differential/freebsd-check.sh`; no CI runs lsof-rs on FreeBSD), as a user
+  and as root; what the two print there is the same but for the points below. **Not measured:**
+  ZFS, FreeBSD 15.x and 13.x, i386, NFS (`-N` selecting a file, `-S` and
+  `-b` against a server that does not answer), nullfs, jails (140). IPv6
+  beyond `::1` (site-local, link-local with a scope, the host's own
+  address) was measured by the parity review and is the same (140, 180).
+  - **Nothing is named** (185): a socket's host and port are numbers, as if
+    `-n -P` were always given, where the C prints `localhost:41000->*:*` and
+    `127.0.0.1:nfsd`. `+M` is read and asks no portmapper: where no
+    `rpcbind` runs, the C's `+M` blocks on a run that lists an Internet
+    socket (measured: `-n -P -o +M` was still waiting after 30 seconds),
+    and lsof-rs returns at once, a difference kept for safety (185).
+  - **No device cache** (148): the C keeps `/dev`'s table in
+    `~/.lsof_<hostname>`, and says so when it creates or updates the file;
+    lsof-rs reads `/dev` on every run, writes nothing into the home
+    directory and trusts no file's contents. `-D` is read as the C reads it
+    and changes nothing: `-D b path` writes no file, `-D r path` reads none,
+    `-D ?` reports that there is no path.
+  - **`-k` and `-m`** (148) are `unsupported option` where the C takes
+    their path: lsof-rs reads nothing from kernel memory. Followed by no
+    word, or by one that opens with `-` or `+`, each is the C's `-k not
+    followed by path` (`-m …`), and that word is read as options (149).
+  - **`-c /regex/`** is read by FreeBSD libc's `regcomp()` grammar, as the
+    C's is, with its refusals in its words (`repetition-operator operand
+    invalid`, `empty (sub)expression`, `trailing backslash (\)`; no GNU
+    `\|`, `\+` or `\w`), and `i` by its case sets and tables. Not
+    reproduced (183), each measured: a word operator (`\<`, `[[:<:]]`)
+    beside a character past ASCII, which FreeBSD's matcher decides by the
+    character's low byte; nesting 100 deep, which the C compiles and
+    lsof-rs refuses (`out of memory`, as on Linux); the C's cost, a safety
+    difference (`/((a{1,255}){1,255}){1,255}/` takes the C 6.3 s and 1.2 GB
+    a process, lsof-rs 0.3 s and 20 MB), and lsof-rs's bound on the lists
+    `i` writes out (20,000 `[[:upper:]]` under `i` are `out of memory`);
+    and the locale: lsof-rs reads expressions and commands as UTF-8
+    whatever `LC_CTYPE` says, where the C under `LC_ALL=C` reads bytes
+    (`/caf.$/` lists `café` in lsof-rs alone).
+  - **The bounded calls' helper** (144) keeps `/dev/null` on descriptor 2,
+    where the C's child has none: on a run that names a path, a listing that
+    holds the helper has that one row more (`lsof /dev/null`). lsof opens
+    it for reading and writing, as the C opens `/dev/null` when it starts,
+    so a FIFO in its place holds no run (measured on FreeBSD: the helper's
+    row is `2u`). The helper
+    greets with the build it is, and a run whose binary was replaced since
+    it started ends `can't fork`, where the C's forked child cannot differ.
+    It exists only when the C's child does: on a run that names a path or
+    `+d`/`+D` (182). Under `-K` with a path, lsof's own process has a second
+    thread, the helper's reader (`lsof-safefs`), which the C does not
+    (141).
+  - `statfs(2)` of a vnode's path is not bounded by `-S`, as the C's is not
+    (143). The `/dev` walk stops past 4,096 directories or 65,536 character
+    devices, with a warning, where the C's has no bound (146).
+  - An Internet socket's JSON object has a `name`, the `-F n` text
+    (`127.0.0.1:39999->*:*`), where the C's has none (134).
+  - The IPv4 far end `->*:*` is what the C built by FreeBSD's own compiler
+    prints; its source reads as if it meant to leave it out, and a C built
+    otherwise may (180).
 - **Refused, where the C works:** a `-c /regex/` expression with groups
   and repetitions nested 100 deep (38; every other POSIX expression glibc
   takes is taken, back-references and intervals of any size among them); a
@@ -354,7 +404,7 @@ meet. Each number is a row there, with the measurement behind it.
 - **Linux, the time a name costs** (154): a socket row's host that
   `/etc/hosts` does not name is asked of DNS once a run, as the C asks it,
   under `/etc/resolv.conf`'s timeouts (above); `-n` asks nothing.
-- **How lsof starts** (170-176): since 2026-11-21 lsof-rs closes every
+- **How lsof starts** (170-179): since 2026-11-21 lsof-rs closes every
   descriptor from 3 up it was started with and wants a `/dev/null` it can
   open for reading and writing, before it reads an option, as the C does:
   a file only lsof itself was handed (`lsof FILE 9<FILE`) is open in no
@@ -365,12 +415,23 @@ meet. Each number is a row there, with the measurement behind it.
   no directory, a link loop) lsof-rs says the table's line all the same,
   and with a `/proc` that is no procfs but holds a `mounts` file it says
   `can't fork` where the C lists nothing: its helper is `/proc/self/exe`,
-  and it makes no bounded call without one (175). With a path argument and
-  a descriptor limit that leaves exactly four free (`ulimit -n 7`) the C
-  lists and lsof-rs says `can't open pipes`: its helper's stderr is a
-  fifth (176). On a kernel with neither `close_range(2)` (before 5.9, or
-  refused by a seccomp filter) nor a `/proc/self/fd`, descriptors numbered
-  past 1,048,576 stay open (170).
+  and it makes no bounded call without one (175). A FIFO or a device where
+  the mount table should be (a `/proc` of someone's making) ends the run
+  at once, `can't fopen(/proc/mounts, "r"): No such device or address`,
+  where the C waits for ever or runs out of memory (175). With a path
+  argument, a `+d`/`+D` or an `-e` and a descriptor limit that leaves
+  exactly four free (`ulimit -n 7`, and no other) the C lists and lsof-rs
+  says `can't open pipes`: its helper's stderr is a fifth (176). Under a
+  process limit that leaves room for one more task (`ulimit -u 2`) or a
+  small address space (`ulimit -v 6000`) the C lists and lsof-rs says
+  `can't fork`: it needs a helper and a thread to read it (178). An
+  allocation that fails (an address-space limit near a capped file's
+  size, such as a 15 MiB `+m` file under `ulimit -v 60000`) ends lsof-rs
+  with `SIGABRT` where the C says `no space for …` and exits 1 (179). In a
+  pid namespace sharing the outer `/proc`, lsof-rs tells offsets where
+  the C cannot (177). On a kernel with neither `close_range(2)` (before
+  5.9, or refused by a seccomp filter) nor a `/proc/self/fd`, descriptors
+  numbered past 1,048,576 stay open (170).
 - **`-r m<fmt>`, `+m m` and their residues** (152, 153): a zone file that is
   no regular file (a FIFO, a device) is waited on 3 seconds at most in all,
   where glibc's waits for ever, and then taken as unreadable (a FIFO with
@@ -448,10 +509,14 @@ meet. Each number is a row there, with the measurement behind it.
   since 2026-11-21 (`/proc`, held for the scan, and its own
   `/proc/PID/fd`), but for the process that makes the bounded calls: the
   pipes to it are lsof-rs's descriptors 4 and 5 where the C's are 5 and 6
-  (so `/proc/PID/fd` is 6, the C's 4) unless a path argument was given,
-  the helper has `/dev/null` on its fd 2, and `-K` lists the thread that
-  reads its replies. A script that looks for lsof's own `/proc` row finds
-  it at 3 in both.
+  (so `/proc/PID/fd` is 6, the C's 4) unless a path argument was given;
+  under `-b` and `-O`, which start no helper, both have `/proc` at 3 and
+  `/proc/PID/fd` at 4. The helper has `/dev/null` on its fd 2, and the
+  thread that reads its replies is listed as a task (`TID TASKCMD
+  lsof-safe`, its own `/proc/PID/task/TID/fd` at 6) on every run with no
+  selection, where the C lists tasks too, and under `-K`; the C,
+  single-threaded, has none. A script that looks for lsof's own `/proc`
+  row finds it at 3 in both.
 - **Linux, in a PID namespace whose `/proc` is the host's** (`unshare -p
   -f` with no `--mount-proc`, a container given the host's `/proc`; 164):
   lsof-rs prints what it prints on a host. The C, which looks for itself

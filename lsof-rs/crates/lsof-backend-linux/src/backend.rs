@@ -90,6 +90,12 @@ impl Backend for LinuxBackend {
         true
     }
 
+    /// The C's probe of its own `fdinfo` (`initialize()`, `dproc.c:630-656`;
+    /// DIVERGENCES 177).
+    fn reports_offsets(&self) -> bool {
+        crate::offtype::known()
+    }
+
     /// The C's `-E`/`+E` tables are built from every process's rows, which
     /// the core has once the gather is over (DIVERGENCES 56).
     fn leaves_endpoints_to_core(&self) -> bool {
@@ -323,7 +329,7 @@ impl Backend for LinuxBackend {
                         sockets_only: sel.sockets_only_for(&t),
                         ..ctx
                     };
-                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx);
+                    t.files = files::for_proc_dir(&base, p.pid, t.uid, &ctx).into();
                     if ctx.stopped() {
                         return failed();
                     }
@@ -365,7 +371,7 @@ impl Backend for LinuxBackend {
                 sockets_only: sel.sockets_only_for(p),
                 ..ctx
             };
-            p.files = files::for_pid(p.pid, p.uid, &ctx);
+            p.files = files::for_pid(p.pid, p.uid, &ctx).into();
             if ctx.stopped() {
                 return failed();
             }

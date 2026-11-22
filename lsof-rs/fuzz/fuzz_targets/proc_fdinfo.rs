@@ -8,11 +8,19 @@
 // panic on arbitrary bytes.
 
 use libfuzzer_sys::fuzz_target;
-use lsof_backend_linux::fuzz_api::{name_for_target, parse_fdinfo, FdInfo, LinkNode};
+use lsof_backend_linux::fuzz_api::{fdinfo_wants, name_for_target, parse_fdinfo, FdInfo, LinkNode};
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
-    let info = parse_fdinfo(&text);
+    // Which lines are read depends on the link (`fdinfo_wants`): every
+    // line kind is asked for here, so every parse path is reached; and the
+    // input's own first line, taken as a link, picks a mask as the backend
+    // would. Neither may panic, and the bounds below hold for both.
+    let first = text.split('\n').next().unwrap_or("");
+    let asked = fdinfo_wants(Some(first.as_bytes()));
+    assert_eq!(asked & 0x0b, 0x0b, "flags, pos and tty-index are always asked");
+    let _ = parse_fdinfo(&text, asked);
+    let info = parse_fdinfo(&text, 0x3f);
 
     // The C keeps at most 32 of an eventpoll's fds (and marks the list once
     // it holds that many); going past it would grow the NAME cell without
@@ -78,7 +86,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     for line in text.lines() {
-        let _ = parse_fdinfo(line);
+        let _ = parse_fdinfo(line, fdinfo_wants(Some(line.as_bytes())));
         for node in [LinkNode::Regular, LinkNode::Anon, LinkNode::Other] {
             let _ = name_for_target(line, &FdInfo::default(), node);
         }

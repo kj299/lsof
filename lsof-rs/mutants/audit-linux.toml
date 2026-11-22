@@ -44,6 +44,13 @@
 # `own-rows-name-the-proc-file-system` and `own-rows-descriptor-numbers`;
 # five `ping-sockets-*`; `ping-sockets-are-not-gated-by-X`), no timeout.
 #
+# Added after the two reviews of 2026-11-21: 16 mutants (the last section:
+# fdinfo's mask and stop rule, 161; the tty-index's negative, 56/157; a
+# thread name's bytes, 93/158), and four above re-anchored on the new
+# `parse_fdinfo` (`ulong-max-is-a-number`, `a-negative-int-is-a-pid`,
+# `a-negative-int-is-an-eventfd-id`, `a-refused-pos-clears-it`). Their run
+# is recorded at the end of that section.
+#
 # Rules with no mutant here, each pinned elsewhere:
 # * 164 (lsof in a PID namespace whose `/proc` is the host's): no code of
 #   lsof-rs's follows the C there; the three ledgered `pidns-outer-*` cases
@@ -196,24 +203,24 @@ old = '''    (value != u64::MAX).then_some(value)'''
 new = '''    Some(value)'''
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),'''
-new = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)),'''
+old = '''            want::PID => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),'''
+new = '''            want::PID => out.pidfd_pid = Some(c_int(ul)),'''
 
 [[mutant]]
 name = "a-negative-int-is-a-pid"
 rule = "a pid the C's `int` holds as negative is -1, no pid (157)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),'''
-new = '''            "Pid:" => out.pidfd_pid = Some(c_int(ul)),'''
+old = '''            want::PID => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),'''
+new = '''            want::PID => out.pidfd_pid = Some(c_int(ul)),'''
 
 [[mutant]]
 name = "a-negative-int-is-an-eventfd-id"
 rule = "an eventfd id the C's `int` holds as negative is -1, no id (157)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            "eventfd-id:" => out.eventfd_id = Some(c_int(ul)).filter(|&id| id != -1),'''
-new = '''            "eventfd-id:" => out.eventfd_id = Some(c_int(ul)),'''
+old = '''            want::EVENTFD_ID => out.eventfd_id = Some(c_int(ul)).filter(|&id| id != -1),'''
+new = '''            want::EVENTFD_ID => out.eventfd_id = Some(c_int(ul)),'''
 
 [[mutant]]
 name = "int-refused-past-32-bits"
@@ -313,20 +320,14 @@ name = "a-refused-pos-clears-it"
 rule = "a line whose number the C refuses changes nothing (161)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''        let Some(ul) = (match key {
-            "flags:" | "pos:" | "eventfd-id:" | "tty-index:" | "Pid:" | "tfd:" => c_strtoul(value),
-            _ => None,
-        }) else {
+old = '''        let Some(ul) = c_strtoul(value) else {
             continue;
         };'''
-new = '''        let Some(ul) = (match key {
-            "flags:" | "pos:" | "eventfd-id:" | "tty-index:" | "Pid:" | "tfd:" => c_strtoul(value),
-            _ => None,
-        }) else {
-            if key == "pos:" {
+new = '''        let Some(ul) = c_strtoul(value) else {
+            if bit == want::POS {
                 out.pos = None;
             }
-            if key == "Pid:" {
+            if bit == want::PID {
                 out.pidfd_pid = None;
             }
             continue;
@@ -688,3 +689,154 @@ new = '''        if let Some(at) = i.checked_sub(1) {
         for _ in sel.empty_command_excludes.iter().filter(|&&at| at == i) {
             miss.push("lsof: command not located: ".to_string());
         }'''
+
+# ---------------------------------------------- the reviews of 2026-11-21
+# The fdinfo lines the C asks for and where it stops (161, the parity
+# review's NIT-4), the tty-index rule's negative (the parity review's
+# TEST-GAP-7), and a thread name kept as its bytes (93, 158, the safety
+# review's LOW-1).
+
+[[mutant]]
+name = "tty-index-negative-is-an-index"
+rule = "a tty-index the C's `int` holds as negative is -1, no index (56, 157)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            want::TTY_INDEX => out.tty_index = u32::try_from(c_int(ul)).ok(),'''
+new = '''            want::TTY_INDEX => out.tty_index = Some(c_int(ul) as u32),'''
+
+[[mutant]]
+name = "fdinfo-asks-for-every-line"
+rule = "fdinfo is asked for flags, pos and tty-index, and the rest by the link (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let mut wants = want::BASE | want::TTY_INDEX;'''
+new = '''    let mut wants = 0x3f;'''
+
+[[mutant]]
+name = "fdinfo-reads-lines-not-asked-for"
+rule = "a line of fdinfo the link does not ask for is not read (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''        if wants & bit == 0 {
+            continue;
+        }'''
+new = '''        let _ = wants & bit;'''
+
+[[mutant]]
+name = "fdinfo-eventf-and-eventp-swapped"
+rule = "`[eventf` asks for eventfd-id, `[eventp` for tfd (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            Some(b'f') => wants |= want::EVENTFD_ID,
+            Some(b'p') => wants |= want::TFD,'''
+new = '''            Some(b'f') => wants |= want::TFD,
+            Some(b'p') => wants |= want::EVENTFD_ID,'''
+
+[[mutant]]
+name = "fdinfo-pid-only-for-a-pidfd-kind"
+rule = "any rest opening with `[p` asks for Pid (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if rest.starts_with(b"[p") || (!rest.is_empty() && source == b"pidfd") {'''
+new = '''    if rest.starts_with(b"[pidfd") || (!rest.is_empty() && source == b"pidfd") {'''
+
+[[mutant]]
+name = "fdinfo-pid-not-for-a-6-9-pidfd"
+rule = "Linux 6.9's `pidfd:[N]` asks for Pid (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    if rest.starts_with(b"[p") || (!rest.is_empty() && source == b"pidfd") {'''
+new = '''    if rest.starts_with(b"[p") {'''
+
+[[mutant]]
+name = "fdinfo-a-path-has-a-rest"
+rule = "a link that is a path has no rest, whatever colon it holds (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''    let Some(link) = link.filter(|l| l.first() != Some(&b'/')) else {'''
+new = '''    let Some(link) = link else {'''
+
+[[mutant]]
+name = "fdinfo-read-before-the-link"
+rule = "the walk asks fdinfo for what the link it read names (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            link.as_ref().ok().map(|t| t.as_os_str().as_bytes()),'''
+new = '''            None,'''
+
+[[mutant]]
+name = "fdinfo-never-stops"
+rule = "fdinfo is read until every line asked for is found (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            want::FLAGS | want::POS => got == wants,'''
+new = '''            want::FLAGS | want::POS => false,'''
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            _ => got == wants || got & want::TFD != 0,'''
+new = '''            _ => got & want::TFD != 0,'''
+
+[[mutant]]
+name = "fdinfo-goes-on-past-the-tfds"
+rule = "a line asked for after the tfd lines ends the read (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            _ => got == wants || got & want::TFD != 0,'''
+new = '''            _ => got == wants,'''
+
+[[mutant]]
+name = "fdinfo-stops-at-the-first-tfd"
+rule = "a tfd line ends the read only with the 32 kept (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            want::TFD => got == wants && out.tfds.len() == EPOLL_MAX_TFDS,'''
+new = '''            want::TFD => got == wants,'''
+
+[[mutant]]
+name = "fdinfo-never-stops-at-a-tfd"
+rule = "a tfd line that leaves all found and 32 kept ends the read (161)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/files.rs"
+old = '''            want::TFD => got == wants && out.tfds.len() == EPOLL_MAX_TFDS,'''
+new = '''            want::TFD => false,'''
+
+[[mutant]]
+name = "task-name-bytes-not-kept"
+rule = "a thread name that is not UTF-8 is kept as its bytes (93)"
+[[mutant.edit]]
+file = "crates/lsof-backend-linux/src/process.rs"
+old = '''            if let Some(name) = raw_task {'''
+new = '''            if let Some(name) = raw_task.filter(|_| false) {'''
+
+[[mutant]]
+name = "task-name-bytes-ignored"
+rule = "a task's name as bytes is its raw bytes where kept (93)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/model.rs"
+old = '''                .and_then(|r| r.task_command.as_deref())'''
+new = '''                .and_then(|r| r.task_command.as_deref().filter(|_| false))'''
+
+[[mutant]]
+name = "taskcmd-printed-from-the-text"
+rule = "TASKCMD is printed from the thread name's bytes (93, 158)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''                "TASKCMD" => Cell::TaskCommand(p.task_command_bytes().unwrap_or(b"")),'''
+new = '''                "TASKCMD" => Cell::TaskCommand(p.task_command.as_deref().unwrap_or("").as_bytes()),'''
+
+[[mutant]]
+name = "taskcmd-sized-from-the-text"
+rule = "TASKCMD's width is the thread name's bytes' (93, 158)"
+[[mutant.edit]]
+file = "crates/lsof-core/src/render/table.rs"
+old = '''        .fold("TASKCMD".len(), |w, p| match p.task_command_bytes() {'''
+new = '''        .fold("TASKCMD".len(), |w, p| match p.task_command.as_deref().map(str::as_bytes) {'''
+
+#
+# Run of 2026-11-21 (after the reviews), the 16 above, the four
+# re-anchored and endpoints-rest's `tty-index-past-int`, gated by the unit
+# and integration gates: 20 of 21 KILLED at first (unit-backend 18,
+# unit-core 2); `fdinfo-goes-on-past-the-tfds` survived, since every case
+# of the test had its `tty-index:` complete the set. A case where it does
+# not was added (`an_eventpolls_fdinfo_ends_at_the_first_line_after_its_tfds`),
+# and the four stop-rule mutants run again: 4 of 4 KILLED (unit-backend).

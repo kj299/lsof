@@ -741,16 +741,18 @@ name = "parser-c-is-f"
 rule = "FreeBSD's +f c is the count, f the address"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = "'c' | 'C' if has_file_struct() => fsv.count = plus,"
-new = "'c' | 'C' if has_file_struct() => fsv.addr = plus,"
+old = '''                                    'c' | 'C' if has_file_struct() => {
+                                        fsv.count = plus;'''
+new = '''                                    'c' | 'C' if has_file_struct() => {
+                                        fsv.addr = plus;'''
 
 [[mutant]]
 name = "parser-letters-anywhere"
 rule = "c, f and n are letters only where the file structure is recorded"
 [[mutant.edit]]
 file = "crates/lsof-cli/src/args.rs"
-old = "'n' | 'N' if has_file_struct() => fsv.node = plus,"
-new = "'n' | 'N' => fsv.node = plus,"
+old = "'n' | 'N' if has_file_struct() => {"
+new = "'n' | 'N' => {"
 
 [[mutant]]
 name = "file-struct-listed-everywhere"

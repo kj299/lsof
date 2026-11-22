@@ -54,9 +54,9 @@ name = "never-renamed"
 rule = "a row a file item locates is named by it (139, 17)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+old = '''    fn located_name(&self, ix: &PathIndex<'_>, f: &OpenFile) -> Option<String> {
         if f.is_socket() {'''
-new = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+new = '''    fn located_name(&self, ix: &PathIndex<'_>, f: &OpenFile) -> Option<String> {
         if true {'''
 
 [[mutant]]
@@ -64,9 +64,9 @@ name = "sockets-renamed"
 rule = "a socket keeps its own name: the C entered it before it asks (139)"
 [[mutant.edit]]
 file = "crates/lsof-core/src/selection.rs"
-old = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+old = '''    fn located_name(&self, ix: &PathIndex<'_>, f: &OpenFile) -> Option<String> {
         if f.is_socket() {'''
-new = '''    fn rename_located(&self, ix: &PathIndex<'_>, f: &mut OpenFile) {
+new = '''    fn located_name(&self, ix: &PathIndex<'_>, f: &OpenFile) -> Option<String> {
         if false {'''
 
 [[mutant]]

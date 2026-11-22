@@ -598,8 +598,9 @@ fn reader(mut from: ChildStdout) -> io::Result<Receiver<Option<Frame>>> {
     Ok(rx)
 }
 
-/// How a helper is started: the command, ready but for spawning.
-pub type Launcher = Box<dyn Fn() -> Command + Send + Sync>;
+/// How a helper is started: the command, ready but for spawning, or why
+/// it could not be made ready (its `/dev/null` would not open).
+pub type Launcher = Box<dyn Fn() -> io::Result<Command> + Send + Sync>;
 
 /// What to do when no helper can be started: in lsof, the C's words for the
 /// step that failed ([`cannot_start`]: `can't open pipes` or `can't fork`)
@@ -607,7 +608,7 @@ pub type Launcher = Box<dyn Fn() -> Command + Send + Sync>;
 pub type OnFailure = Box<dyn Fn(&io::Error) + Send + Sync>;
 
 /// The helper's command line and surroundings, `program` with `args`: stdin
-/// and stdout pipes, stderr `/dev/null`, no environment. Its working
+/// and stdout pipes, stderr `/dev/null` (opened read and write), no environment. Its working
 /// directory is lsof's, as a forked child's is: a relative path is sent as
 /// it was given, and names for the helper what it names for lsof. (Sending it
 /// through `/proc/<lsof>/cwd` instead had needed the helper to see lsof's
@@ -616,15 +617,48 @@ pub type OnFailure = Box<dyn Fn(&io::Error) + Send + Sync>;
 /// denied` — and to know lsof's pid as procfs numbers it, which in a pid
 /// namespace sharing the host's `/proc` it did not: it named another
 /// process's directory.)
-pub fn helper_command(program: impl AsRef<OsStr>, args: &[&OsStr]) -> Command {
+pub fn helper_command(program: impl AsRef<OsStr>, args: &[&OsStr]) -> io::Result<Command> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    cmd
+        .stderr(dev_null()?);
+    Ok(cmd)
 }
+
+/// The helper's descriptor 2: `/dev/null`, opened for reading and writing.
+///
+/// Not `Stdio::null()`, which std opens for writing alone: where
+/// `/dev/null` is a FIFO, an open for writing waits for a reader that never
+/// comes, and every run that started the helper hung there (measured: a
+/// tmpfs over `/dev` and `mkfifo /dev/null`; the C lists). An open for
+/// reading and writing never waits on a FIFO, which is why the C's own
+/// first step, `open("/dev/null", O_RDWR)` (`main.c:178`), does not either,
+/// and the C opens it no second time: its child has nothing on 2
+/// (`lib/misc.c:345`). lsof's own start-up has opened it this way already
+/// (`lsof-sigpipe`), so what cannot be opened so has ended the run before
+/// this; and where it can no longer be (no descriptor left for it), the
+/// error is the helper's that could not start, in the C's words for its
+/// own failed step ([`cannot_start`]). The helper's row for it is `2u`
+/// (DIVERGENCES 123).
+fn dev_null() -> io::Result<Stdio> {
+    let null = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
+    // Moved above the numbers the helper's pipes are made at, so that lsof
+    // keeps its ends at the C's numbers (the C's child gets no descriptor 2,
+    // so its pipes are the lowest free numbers: DIVERGENCES 123, 166). Where
+    // the limit leaves no room up there, it stays where it was opened.
+    Ok(match rustix::io::fcntl_dupfd_cloexec(&null, NULL_ABOVE) {
+        Ok(high) => Stdio::from(high),
+        Err(_) => Stdio::from(null),
+    })
+}
+
+/// The lowest number the helper's `/dev/null` is moved to ([`dev_null`]).
+const NULL_ABOVE: std::os::fd::RawFd = 10;
 
 /// How this process was started: `/proc/self/cmdline`'s words, which keep a
 /// dynamic loader's, and the arguments `main` was given, which do not.
@@ -979,7 +1013,7 @@ impl Helper {
     /// One that does not greet as lsof-rs's helper of this [`PROTOCOL`] is
     /// killed, and no call is made of it.
     fn start(&self, state: &mut State, wait: Duration) -> io::Result<()> {
-        let mut child = (self.launch)().spawn()?;
+        let mut child = (self.launch)()?.spawn()?;
         let (Some(to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
             state.killed.push(child);
@@ -1482,6 +1516,28 @@ mod tests {
             view.cwd,
             std::env::current_dir().unwrap().into_os_string().into_vec()
         );
+    }
+
+    /// The helper's descriptor 2 is `/dev/null` opened for reading and
+    /// writing, as lsof's own start-up opens it: an open for writing alone,
+    /// which `Stdio::null()` makes, waits for ever where `/dev/null` is a
+    /// FIFO (measured; the C lists). The shell reads its own `fdinfo`:
+    /// `O_RDWR` is 2 in the flags' low two bits.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri cannot spawn a process")]
+    fn the_helpers_stderr_is_dev_null_read_and_write() {
+        let script = "if [ /proc/self/fd/2 -ef /dev/null ]; then echo null; fi; \
+                      while read -r k v; do if [ \"$k\" = flags: ]; then echo \"$v\"; fi; done \
+                      < /proc/self/fdinfo/2";
+        let out = helper_command("/bin/sh", &[OsStr::new("-c"), OsStr::new(script)])
+            .expect("/dev/null opens")
+            .output()
+            .expect("run sh");
+        let said = String::from_utf8_lossy(&out.stdout);
+        let mut lines = said.lines();
+        assert_eq!(lines.next(), Some("null"), "{said}");
+        let flags = lines.next().and_then(|f| u32::from_str_radix(f, 8).ok());
+        assert_eq!(flags.map(|f| f & 0o3), Some(2), "{said}");
     }
 
     #[test]

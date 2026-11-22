@@ -203,7 +203,7 @@ fn attach(procs: &mut Vec<Process>, idx: &mut HashMap<u32, usize>, pid: u32, fil
             unlisted: false,
             raw_names: None,
             file_structs: None,
-            files: vec![file],
+            files: vec![file].into(),
         });
         idx.insert(pid, i);
     }

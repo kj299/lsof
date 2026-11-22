@@ -630,6 +630,32 @@ impl SocketInfo {
         }
     }
 
+    /// Whether this is a FreeBSD row's socket: the one backend that fills
+    /// [`TcpExtInfo::bsd`], and fills it for every socket row it makes.
+    pub fn is_bsd(&self) -> bool {
+        self.tcp.is_some_and(|t| t.bsd.is_some())
+    }
+
+    /// The two ends the C entered for the socket (`ent_inaddr()`), local
+    /// then foreign: what NAME prints (`printinaddr()`) and what `-i`'s
+    /// address specifications are compared with, an end at a time
+    /// (`is_nw_addr()`).
+    ///
+    /// On Linux an end whose address is unspecified and whose port is 0 is
+    /// none (`dsock.c`: `if (tp->faddr || tp->fport) fa = …; else fa = NULL`).
+    /// A FreeBSD row's ends are the ones its backend recorded, as they are:
+    /// that dialect enters the local end of every Internet socket it finds a
+    /// PCB for, and the foreign end of every IPv4 one, unspecified or not
+    /// (DIVERGENCES 180), so `0.0.0.0:0` is an end there, printed `*:*` and
+    /// matched by `-i :0`.
+    pub fn entered_ends(&self) -> [Option<SocketAddr>; 2] {
+        if self.is_bsd() {
+            return [self.local, self.remote];
+        }
+        let end = |a: Option<SocketAddr>| a.filter(|a| !is_unspecified(a));
+        [end(self.local), end(self.remote)]
+    }
+
     /// Render the lsof NAME field for a socket, honoring name/port resolution
     /// suppression. With both `numeric_*` flags set the output is purely
     /// numeric (the `-n -P` behavior).
@@ -1035,6 +1061,96 @@ impl OpenFile {
     }
 }
 
+/// A process's files: a list a copy of the process shares until one of
+/// them changes it (`Arc::make_mut`). Under `-K` every thread of a process
+/// is an entry of its own with the process's files (the C reads them again
+/// for each, `dproc.c:432-477`); shared, they are held once a process
+/// however many threads it has, where a copy each made the run's memory the
+/// threads times the files (DIVERGENCES 141). It reads as a
+/// `Vec<OpenFile>`, and a change to it is made to the entry's own copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Files(std::sync::Arc<Vec<OpenFile>>);
+
+impl Files {
+    /// Whether `self` and `other` are one list, not two copies.
+    pub fn shares(&self, other: &Files) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Keep the rows `keep` takes: in place where no other entry shares the
+    /// list, and otherwise as a list of its own made of those rows alone,
+    /// not of a copy of every row first.
+    pub fn keep(&mut self, mut keep: impl FnMut(&OpenFile) -> bool) {
+        match std::sync::Arc::get_mut(&mut self.0) {
+            Some(files) => files.retain(|f| keep(f)),
+            None => {
+                let kept: Vec<OpenFile> = self.0.iter().filter(|f| keep(f)).cloned().collect();
+                self.0 = std::sync::Arc::new(kept);
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for Files {
+    type Target = Vec<OpenFile>;
+
+    fn deref(&self) -> &Vec<OpenFile> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Files {
+    /// The entry's own list, copied first where another entry shares it.
+    fn deref_mut(&mut self) -> &mut Vec<OpenFile> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl From<Vec<OpenFile>> for Files {
+    fn from(files: Vec<OpenFile>) -> Self {
+        Files(std::sync::Arc::new(files))
+    }
+}
+
+impl FromIterator<OpenFile> for Files {
+    fn from_iter<I: IntoIterator<Item = OpenFile>>(iter: I) -> Self {
+        Files::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl IntoIterator for Files {
+    type Item = OpenFile;
+    type IntoIter = std::vec::IntoIter<OpenFile>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::unwrap_or_clone(self.0).into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Files {
+    type Item = &'a OpenFile;
+    type IntoIter = std::slice::Iter<'a, OpenFile>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Files {
+    type Item = &'a mut OpenFile;
+    type IntoIter = std::slice::IterMut<'a, OpenFile>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::make_mut(&mut self.0).iter_mut()
+    }
+}
+
+impl PartialEq<Vec<OpenFile>> for Files {
+    fn eq(&self, other: &Vec<OpenFile>) -> bool {
+        *self.0 == *other
+    }
+}
+
 /// A process and the files it has open — analog of `struct lproc`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Process {
@@ -1063,7 +1179,7 @@ pub struct Process {
     /// Process group ID, for lsof's `-F g` field. `None` on platforms without
     /// process groups (Windows).
     pub pgid: Option<u32>,
-    pub files: Vec<OpenFile>,
+    pub files: Files,
     /// `+E`: set by a backend when this process is in the result only because
     /// it is the peer endpoint of a selected process's pipe. The selection
     /// engine keeps such a process (its pipe rows only) even though it matches
@@ -1084,21 +1200,25 @@ pub struct Process {
     /// FreeBSD: each numbered descriptor's [`FileStruct`], by descriptor
     /// number, sorted; `None` where none was asked for (no `+f c`/`f`/`n`)
     /// and on every other platform.
-    pub file_structs: Option<Box<[(u64, FileStruct)]>>,
+    pub file_structs: Option<std::sync::Arc<[(u64, FileStruct)]>>,
 }
 
-/// A command or login name that is not UTF-8, kept as the bytes it is, for
-/// what the C does with bytes: `-c` compares the command's bytes, COMMAND and
-/// `-F c` print each byte that is not text as `\xNN`, and USER and `-F L`
-/// the login's (DIVERGENCES 92, 70). [`Process::command`] and
-/// [`Process::user`] still hold them decoded lossily, for JSON, which must be
-/// UTF-8, and for whatever reads them as text.
+/// A command, login or thread name that is not UTF-8, kept as the bytes it
+/// is, for what the C does with bytes: `-c` compares the command's bytes,
+/// COMMAND and `-F c` print each byte that is not text as `\xNN`, USER and
+/// `-F L` the login's (DIVERGENCES 92, 70), and TASKCMD the thread name's
+/// (DIVERGENCES 93). [`Process::command`], [`Process::user`] and
+/// [`Process::task_command`] still hold them decoded lossily, for JSON,
+/// which must be UTF-8, for `-F M`, and for whatever reads them as text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RawNames {
     /// The command's bytes, where they are not UTF-8.
     pub command: Option<Box<[u8]>>,
     /// The login's bytes (cut to the C's 32), where they are not UTF-8.
     pub login: Option<Box<[u8]>>,
+    /// A task's own name's bytes ([`Process::task_command`]), where they
+    /// are not UTF-8.
+    pub task_command: Option<Box<[u8]>>,
 }
 
 impl Process {
@@ -1121,6 +1241,18 @@ impl Process {
             .as_deref()
             .and_then(|r| r.command.as_deref())
             .unwrap_or(self.command.as_bytes())
+    }
+
+    /// A task's name as bytes: [`RawNames::task_command`], or
+    /// [`Process::task_command`]. `None` for an entry that is no task.
+    pub fn task_command_bytes(&self) -> Option<&[u8]> {
+        let text = self.task_command.as_deref()?;
+        Some(
+            self.raw_names
+                .as_deref()
+                .and_then(|r| r.task_command.as_deref())
+                .unwrap_or(text.as_bytes()),
+        )
     }
 
     /// The login as bytes: [`RawNames::login`], or [`Process::user`].
@@ -1160,6 +1292,7 @@ mod login_tests {
         p.raw_names = Some(Box::new(RawNames {
             command: Some(b"c\xff"[..].into()),
             login: None,
+            task_command: None,
         }));
         p.set_login(b"ab\xffcd"[..].into());
         assert_eq!(p.user.as_deref(), Some("ab\u{fffd}cd"));

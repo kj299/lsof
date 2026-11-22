@@ -290,6 +290,19 @@ pub trait Backend {
         false
     }
 
+    /// Whether this platform can tell a file's offset, and the file flags
+    /// it reads from the same place: the C's Linux `OffType`, set by a
+    /// probe of its own `fdinfo` once its file arguments are entered and
+    /// before it reads the mount table for a run that has none
+    /// (`initialize()`, `lib/dialects/linux/dproc.c:630-656`). Where it
+    /// cannot, the C disregards `-o` and `+f`, with a warning for each
+    /// unless `-w`, and shows sizes (`dproc.c:657-664`, `main.c:1279-1286`;
+    /// DIVERGENCES 177). Asked once a run, where the C probes. `true`, the
+    /// default, on a platform whose C makes no such probe.
+    fn reports_offsets(&self) -> bool {
+        true
+    }
+
     /// Whether `-E`/`+E` are left to the core, which names a pipe's and a
     /// local connection's other ends from the rows gathered
     /// ([`Selection::endpoints_in_core`](crate::Selection)), rather than
@@ -305,6 +318,17 @@ pub trait Backend {
     /// ends by. Empty where the backend reads none (DIVERGENCES 56).
     fn take_endpoint_tables(&self) -> crate::EndpointTables {
         crate::EndpointTables::default()
+    }
+
+    /// The devices of the files the last [`Backend::gather`] typed NFS files
+    /// itself, handed over once: what `-N` selects where the dialect types a
+    /// file by the file system its own vnode is on and reads no mount table
+    /// for it (FreeBSD: `Ntype = N_NFS`, `dnode.c:364`, `:524`; DIVERGENCES
+    /// 182). They replace [`Selection::nfs_devices`](crate::Selection) for
+    /// that gather's rows. `None`, the default, where the mount table says
+    /// which files are on NFS (Linux), or nothing does.
+    fn take_nfs_devices(&self) -> Option<std::collections::HashSet<u64>> {
+        None
     }
 
     /// The login of `uid`, as bytes, for an owner the listing prints by

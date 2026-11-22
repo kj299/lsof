@@ -136,11 +136,12 @@ pub fn numeric_host(ip: IpAddr) -> String {
 
 /// The two ends the C records for a socket (`dsock.c:3895-3911`,
 /// `ent_inaddr()`): an end whose address is unspecified and whose port is 0
-/// is none; and where either end is an IPv4-mapped IPv6 address, both are
-/// read as IPv4, the last four bytes of each.
+/// is none, but on a FreeBSD row, whose ends are the ones its backend
+/// entered ([`SocketInfo::entered_ends`]); and where either end is an
+/// IPv4-mapped IPv6 address, both are read as IPv4, the last four bytes of
+/// each.
 pub fn c_ends(info: &SocketInfo) -> [Option<SocketAddr>; 2] {
-    let end = |a: Option<SocketAddr>| a.filter(|a| !(a.ip().is_unspecified() && a.port() == 0));
-    let (local, remote) = (end(info.local), end(info.remote));
+    let [local, remote] = info.entered_ends();
     let mapped = |a: &Option<SocketAddr>| matches!(a, Some(SocketAddr::V6(v6)) if v6.ip().to_ipv4_mapped().is_some());
     if !(mapped(&local) || mapped(&remote)) {
         return [local, remote];

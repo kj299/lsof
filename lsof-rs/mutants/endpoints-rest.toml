@@ -247,8 +247,8 @@ name = "tty-index-past-int"
 rule = "a tty-index past the C's int is none (56)"
 [[mutant.edit]]
 file = "crates/lsof-backend-linux/src/files.rs"
-old = '''            "tty-index:" => out.tty_index = u32::try_from(c_int(ul)).ok(),'''
-new = '''            "tty-index:" => out.tty_index = u32::try_from(ul).ok(),'''
+old = '''            want::TTY_INDEX => out.tty_index = u32::try_from(c_int(ul)).ok(),'''
+new = '''            want::TTY_INDEX => out.tty_index = u32::try_from(ul).ok(),'''
 
 # ------------------------------------------------- 56: eventfds, mqueues
 

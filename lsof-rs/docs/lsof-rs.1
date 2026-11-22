@@ -180,6 +180,48 @@ is refused where SELinux is enabled
 .RB ( "\-Z (SELinux context) is not implemented" ),
 where the C prints a CONTEXT column.
 .TP
+.B FreeBSD
+The options are those of FreeBSD's C lsof
+.RB ( \-K
+lists threads with a TID column;
+.B +M
+and
+.B \-M
+are read;
+.BR \-e ,
+.BR \-E ,
+.B \-X
+and
+.B \-Z
+are no options there), with these differences.
+No device cache file is read or written: the C keeps
+.IR /dev 's
+table in a file in the home directory and says so when it creates or
+updates it, and
+.B lsof
+reads
+.I /dev
+on every run.
+.B \-D
+is read as the C reads it and changes nothing;
+.B "\-D ?"
+reports that there is no cache path.
+.B \-k
+and
+.B \-m
+are
+.BR "unsupported option" :
+nothing is read from kernel memory.
+A socket's host and port are always numbers, as under
+.BR "\-n \-P" .
+On a run that names a path,
+.B lsof
+makes its bounded calls in a helper process, as the C does in a child;
+the helper has
+.I /dev/null
+as descriptor 2 where the C's child has none, so a listing that holds it
+shows that one row more.
+.TP
 .B Windows
 A closed pipe ends the run with exit status 141, as there is no
 .B SIGPIPE
@@ -227,6 +269,9 @@ them up unless
 is given.
 .SH EXIT STATUS
 0 when every search item was found, 1 otherwise or on an error, as the C's;
+.B "\-c ^"
+with no name excludes every command, so nothing is listed and the status
+is 1, as the C's;
 .B +r
 exits 1 when its first cycle lists nothing.
 .SH SEE ALSO

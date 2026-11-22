@@ -8,7 +8,7 @@ use std::path::Path;
 
 use lsof_core::backend::{Backend, BackendError};
 use lsof_core::model::{FdType, LockKind, Process};
-use lsof_core::selection::Selection;
+use lsof_core::selection::{Selection, TaskMode};
 
 use crate::kinfo::{self, KFile, Pcb, XFile};
 use crate::layout::{self, kf, sock};
@@ -21,6 +21,12 @@ pub struct FreeBsdBackend {
     /// The run's device table (`devnames::DevCache`): made as the first
     /// gather starts, as the C makes it as it starts, and kept for the run.
     devs: OnceCell<devnames::DevCache>,
+    /// The file systems found so far (`readvfs()`'s `Lvfs`), kept for the
+    /// run as the C keeps its list: a `-r` cycle finds what the last found.
+    vfs: rows::VfsList,
+    /// The devices of the rows the last gather typed NFS files, where `-N`
+    /// asked ([`Backend::take_nfs_devices`]).
+    nfs: RefCell<HashSet<u64>>,
 }
 
 impl FreeBsdBackend {
@@ -28,6 +34,8 @@ impl FreeBsdBackend {
         Self {
             root: sys::euid() == 0,
             devs: OnceCell::new(),
+            vfs: rows::VfsList::default(),
+            nfs: RefCell::default(),
         }
     }
 
@@ -106,7 +114,8 @@ struct Pcbs {
 /// The [`Env`] of a live gather: each table read on first use.
 struct Live<'a> {
     sel: &'a Selection,
-    vfs: RefCell<Vec<Vfs>>,
+    vfs: &'a rows::VfsList,
+    nfs: &'a RefCell<HashSet<u64>>,
     locks: OnceCell<HashMap<(i32, u64, u64), LockKind>>,
     pcbs: OnceCell<Pcbs>,
     devs: &'a devnames::DevCache,
@@ -115,10 +124,11 @@ struct Live<'a> {
 }
 
 impl<'a> Live<'a> {
-    fn new(sel: &'a Selection, devs: &'a devnames::DevCache) -> Self {
+    fn new(sel: &'a Selection, backend: &'a FreeBsdBackend, devs: &'a devnames::DevCache) -> Self {
         Live {
             sel,
-            vfs: RefCell::default(),
+            vfs: &backend.vfs,
+            nfs: &backend.nfs,
             locks: OnceCell::new(),
             pcbs: OnceCell::new(),
             devs,
@@ -158,32 +168,18 @@ impl<'a> Live<'a> {
 impl Env for Live<'_> {
     fn vfs(&self, fsid: u64, path: &[u8]) -> Option<Vfs> {
         use std::os::unix::ffi::OsStrExt;
-        if fsid != layout::VNOVAL {
-            if let Some(v) = self.vfs.borrow().iter().find(|v| v.fsid == fsid) {
-                return Some(v.clone());
-            }
+        // `statfs(2)` in lsof itself, as the C's (DIVERGENCES 143).
+        self.vfs.find(fsid, path, &|path| {
+            sys::statfs_path(Path::new(std::ffi::OsStr::from_bytes(path)))
+                .ok()
+                .and_then(|b| kinfo::statfs(&b))
+        })
+    }
+
+    fn nfs_file(&self, dev: u64) {
+        if self.sel.nfs_only {
+            self.nfs.borrow_mut().insert(dev);
         }
-        if path.is_empty() {
-            return None;
-        }
-        let m = sys::statfs_path(Path::new(std::ffi::OsStr::from_bytes(path)))
-            .ok()
-            .and_then(|b| kinfo::statfs(&b))?;
-        let mut cache = self.vfs.borrow_mut();
-        if let Some(v) = cache
-            .iter()
-            .find(|v| v.fsname == m.mntfrom && v.dir == m.mnton)
-        {
-            return Some(v.clone());
-        }
-        let v = Vfs {
-            dir: m.mnton,
-            fsname: m.mntfrom,
-            typnm: m.fstypename,
-            fsid,
-        };
-        cache.push(v.clone());
-        Some(v)
     }
 
     fn lock(&self, pid: i32, fsid: u64, fileid: u64) -> Option<LockKind> {
@@ -263,11 +259,20 @@ impl Env for Live<'_> {
 }
 
 /// A process's [`lsof_core::Process::file_structs`].
-type FileStructs = Option<Box<[(u64, lsof_core::FileStruct)]>>;
+type FileStructs = Option<std::sync::Arc<[(u64, lsof_core::FileStruct)]>>;
 
 /// The rows of one process, in the kernel's order (`process_file_descriptors()`),
 /// and, where `+f` asks for it, each numbered row's file structure, by
 /// descriptor number.
+///
+/// `sockets_only` is the C's `ckscko`, which in this dialect skips no
+/// record (`dproc.c:255-286`): it only keeps a special from being read as
+/// one, and silences the warning for a kind it does not know. Every record
+/// is still made a row and linked where its process was selected, a row
+/// that no listing of sockets alone can print; but one that is there
+/// locates `-K` and `-N`. Measured on FreeBSD 14.5: `lsof -V -K -a -p P
+/// -U`, P holding no socket, prints nothing and exits 0, where Linux's C
+/// says `no tasks located` and exits 1.
 fn rows_of(
     pid: i32,
     files: &[KFile],
@@ -277,6 +282,7 @@ fn rows_of(
 ) -> (Vec<lsof_core::model::OpenFile>, FileStructs) {
     let mut out = Vec::with_capacity(files.len());
     let mut structs = Vec::new();
+    rows::precache_vfs(files, env);
     for k in files {
         let special = match k.fd() {
             kf::FD_CWD => Some(FdType::Cwd),
@@ -287,11 +293,10 @@ fn rows_of(
             _ => None,
         };
         match (special, k.fd()) {
-            (Some(fd), _) => {
-                if !sockets_only {
-                    out.push(rows::special(k, fd, pid, env));
-                }
-            }
+            // Under `ckscko` the C reads a special as a numbered descriptor
+            // whose number is negative (the final `else`), a row it never
+            // prints: here it is the special it is, never printed either.
+            (Some(fd), _) => out.push(rows::special(k, fd, pid, env)),
             (None, n) if n < 0 => {
                 if !sockets_only {
                     warn(
@@ -301,9 +306,6 @@ fn rows_of(
                 }
             }
             (None, _) => {
-                if sockets_only && k.kind() != kf::TYPE_SOCKET {
-                    continue;
-                }
                 let row = rows::numbered(k, pid, env, opts);
                 if opts.file_struct {
                     if let lsof_core::model::FdType::Handle(n) = row.fd {
@@ -318,7 +320,7 @@ fn rows_of(
     // Sorted and one per descriptor, for `Process::file_struct`'s search.
     structs.sort_by_key(|(n, _)| *n);
     structs.dedup_by_key(|(n, _)| *n);
-    let structs = opts.file_struct.then(|| structs.into_boxed_slice());
+    let structs = opts.file_struct.then(|| structs.into());
     (out, structs)
 }
 
@@ -391,40 +393,29 @@ impl Backend for FreeBsdBackend {
         .found()
     }
 
+    fn take_nfs_devices(&self) -> Option<HashSet<u64>> {
+        Some(std::mem::take(&mut *self.nfs.borrow_mut()))
+    }
+
     fn gather(&self, sel: &Selection) -> Result<Vec<Process>, BackendError> {
         // The C reads `/dev` before anything else it lists (`main.c:1304`).
         let devs = self.devs(sel);
-        let buf = sys::sysctl_mib(&[layout::CTL_KERN, layout::KERN_PROC, layout::KERN_PROC_PROC])
-            .map_err(|e| {
-            BackendError::Os(format!("can't read process table: {}", errno(&e)))
-        })?;
+        self.nfs.borrow_mut().clear();
+        // `-K`, and not `-K i`: `Ftask`, under which the C reads every
+        // thread's record and makes each a task (`dproc.c:390`, `:443`). A
+        // run with no selection at all lists none, unlike Linux's: the
+        // dialect asks `Ftask`, never `Selflags`.
+        let tasks = sel.tasks == TaskMode::Always;
+        let which = if tasks {
+            layout::KERN_PROC_ALL
+        } else {
+            layout::KERN_PROC_PROC
+        };
+        let buf = sys::sysctl_mib(&[layout::CTL_KERN, layout::KERN_PROC, which])
+            .map_err(|e| BackendError::Os(format!("can't read process table: {}", errno(&e))))?;
         let kprocs = kinfo::procs(&buf, layout::PROC_HOST.as_ref())
             .map_err(|e| BackendError::Os(format!("can't read process table: {}", e.0)))?;
-        let mut procs: Vec<Process> = kprocs
-            .into_iter()
-            // The C passes by a process with no state and a zombie.
-            .filter(|k| k.stat != 0 && k.stat != layout::SZOMB)
-            .filter_map(|k| {
-                Some(Process {
-                    pid: u32::try_from(k.pid).ok()?,
-                    ppid: u32::try_from(k.ppid).ok(),
-                    command: String::from_utf8_lossy(&k.comm).into_owned(),
-                    // Asked as it is printed (`Backend::login_name`).
-                    user: None,
-                    tid: None,
-                    task_command: None,
-                    uid: Some(k.uid),
-                    pgid: u32::try_from(k.pgid).ok(),
-                    files: Vec::new(),
-                    endpoint_peer: false,
-                    unlisted: false,
-                    raw_names: None,
-                    file_structs: None,
-                })
-            })
-            .collect();
-        procs.sort_by_key(|p| p.pid);
-        procs.dedup_by_key(|p| p.pid);
+        let mut procs = rows::entries(kprocs, tasks);
 
         // `-t` alone: no rows are printed, but a process is listed only
         // through its rows, and one whose descriptors cannot be read has
@@ -440,33 +431,52 @@ impl Backend for FreeBsdBackend {
             return Ok(procs);
         }
 
-        let restrict: Option<HashSet<u32>> = sel.has_process_selector().then(|| {
+        let restrict: Option<HashSet<(u32, Option<u32>)>> = sel.has_process_selector().then(|| {
             procs
                 .iter()
                 .filter(|p| sel.selects_process(p))
-                .map(|p| p.pid)
+                .map(|p| (p.pid, p.tid))
                 .collect()
         });
-        let env = Live::new(sel, devs);
-        let opts = Opts {
-            inet: sel.inet.enabled,
-            file_struct: sel.file_struct,
-        };
-        let sockets_only = sel.socket_rows_only();
+        let env = Live::new(sel, self, devs);
+        let opts = Opts::of(sel);
+        // The rows of the process whose task was read last: every thread of
+        // a process is given the same files (the C reads them again for
+        // each, `process_file_descriptors()` of the same PID), and shares
+        // them, so that they are held once a process however many threads
+        // it has (`Files`).
+        let mut last: Option<(u32, bool, lsof_core::Files, FileStructs)> = None;
         for p in procs.iter_mut() {
-            if restrict.as_ref().is_some_and(|s| !s.contains(&p.pid)) {
+            if restrict
+                .as_ref()
+                .is_some_and(|s| !s.contains(&(p.pid, p.tid)))
+            {
                 continue;
             }
             let Ok(pid) = i32::try_from(p.pid) else {
                 continue;
             };
-            // A process whose descriptors cannot be read has no rows, and so
-            // no line, as in the C (`kinfo_getfile()` returns NULL, and
-            // nothing is linked): there is no `NOFD` row on FreeBSD.
-            (p.files, p.file_structs) = match filedesc(pid) {
-                Ok(files) => rows_of(pid, &files, &env, sockets_only, opts),
-                Err(_) => (Vec::new(), None),
-            };
+            // The C's `ckscko`, a process at a time (`dproc.c:455-463`).
+            let sockets_only = sel.sockets_only_for(p);
+            match &last {
+                Some((of, only, files, structs)) if *of == p.pid && *only == sockets_only => {
+                    (p.files, p.file_structs) = (files.clone(), structs.clone());
+                }
+                _ => {
+                    // A process whose descriptors cannot be read has no rows,
+                    // and so no line, as in the C (`kinfo_getfile()` returns
+                    // NULL, and nothing is linked): there is no `NOFD` row on
+                    // FreeBSD.
+                    let (files, structs) = match filedesc(pid) {
+                        Ok(files) => rows_of(pid, &files, &env, sockets_only, opts),
+                        Err(_) => (Vec::new(), None),
+                    };
+                    (p.files, p.file_structs) = (files.into(), structs);
+                    if tasks {
+                        last = Some((p.pid, sockets_only, p.files.clone(), p.file_structs.clone()));
+                    }
+                }
+            }
             p.unlisted = p.files.is_empty();
         }
         Ok(procs)
@@ -522,10 +532,97 @@ mod tests {
         let row = p
             .files
             .iter()
-            .find(|f| f.name == format!("127.0.0.1:{port}"))
+            .find(|f| f.name == format!("127.0.0.1:{port}->*:*"))
             .unwrap_or_else(|| panic!("no row for the listener: {:?}", p.files));
         assert_eq!(row.node.as_deref(), Some("TCP"));
         let st = row.socket.as_deref().and_then(|s| s.state);
         assert_eq!(st.map(lsof_core::model::SockState::as_str), Some("LISTEN"));
+    }
+    /// An unconnected IPv4 UDP socket has its foreign end, `*:*`; an IPv6
+    /// one has none (DIVERGENCES 180).
+    #[test]
+    fn a_udp_socket_shows_its_far_end_as_the_c_does() {
+        let v4 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = v4.local_addr().unwrap().port();
+        let v6 = std::net::UdpSocket::bind("[::1]:0").ok();
+        let me = std::process::id();
+        let sel = Selection {
+            pids: vec![me],
+            ..Default::default()
+        };
+        let procs = FreeBsdBackend::new().gather(&sel).unwrap();
+        let p = procs.iter().find(|p| p.pid == me).unwrap();
+        let named = |name: String| p.files.iter().any(|f| f.name == name);
+        assert!(
+            named(format!("127.0.0.1:{port}->*:*")),
+            "no row for the IPv4 socket: {:?}",
+            p.files
+        );
+        if let Some(port6) = v6
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.port())
+        {
+            assert!(
+                named(format!("[::1]:{port6}")),
+                "no row for the IPv6 socket: {:?}",
+                p.files
+            );
+        }
+    }
+
+    /// Under `-K` each thread of this process is an entry with its TID, a
+    /// number FreeBSD starts at 100000 (so `ki_tid` is read where it is),
+    /// each with the process's files; without `-K` the process is one entry
+    /// and has none.
+    #[test]
+    fn under_dash_k_this_processs_threads_are_its_entries() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let rx = std::sync::Arc::clone(&rx);
+                std::thread::spawn(move || {
+                    let _ = rx.lock().map(|r| r.recv());
+                })
+            })
+            .collect();
+        let me = std::process::id();
+        let tasks = Selection {
+            pids: vec![me],
+            and_mode: true,
+            tasks: TaskMode::Always,
+            ..Default::default()
+        };
+        let backend = FreeBsdBackend::new();
+        let procs = backend.gather(&tasks).expect("gather");
+        let mine: Vec<&Process> = procs.iter().filter(|p| p.pid == me).collect();
+        drop(tx);
+        for w in workers {
+            let _ = w.join();
+        }
+        assert!(mine.len() >= 3, "this thread and two more: {}", mine.len());
+        let mut tids: Vec<u32> = mine.iter().filter_map(|p| p.tid).collect();
+        assert_eq!(tids.len(), mine.len(), "every entry is a task");
+        assert!(tids.iter().all(|&t| t >= 100_000), "{tids:?}");
+        assert!(
+            tids.windows(2).all(|w| w[0] < w[1]),
+            "in TID order: {tids:?}"
+        );
+        tids.dedup();
+        assert_eq!(tids.len(), mine.len(), "each thread once");
+        for p in &mine {
+            assert!(p.task_command.is_none());
+            assert!(p.files.iter().any(|f| f.fd == FdType::Cwd), "{:?}", p.files);
+            assert_eq!(p.files.len(), mine[0].files.len());
+        }
+        let plain = Selection {
+            pids: vec![me],
+            ..Default::default()
+        };
+        let procs = backend.gather(&plain).expect("gather");
+        let mine: Vec<&Process> = procs.iter().filter(|p| p.pid == me).collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].tid, None);
     }
 }

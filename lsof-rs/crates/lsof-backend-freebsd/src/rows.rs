@@ -8,16 +8,16 @@
 //! names, a lock, a pcblist entry, a device's name in `/dev` — is asked of an
 //! [`Env`], so the rules can be tested on any host with a fake one.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 
 use lsof_core::model::{
-    AccessMode, BsdSocket, FdType, FileStruct, FileType, LockKind, OpenFile, Protocol, SockState,
-    SocketInfo, TcpExtInfo,
+    AccessMode, BsdSocket, FdType, FileStruct, FileType, LockKind, OpenFile, Process, Protocol,
+    SockState, SocketInfo, TcpExtInfo,
 };
 
-use crate::kinfo::{inet_addr, unix_path, KFile, Pcb, XFile};
-use crate::layout::{kf, sock, KF_TO_FFLAGS, VNOVAL};
+use crate::kinfo::{inet_addr, unix_path, KFile, KProc, Pcb, XFile};
+use crate::layout::{kf, sock, KF_TO_FFLAGS, SZOMB, VNOVAL};
 use crate::names::{alt_hex, dev_string, iproto, kptr, ptr, tcp_state, unknown_family};
 
 /// A mounted file system as `readvfs()` records it: `struct l_vfs`.
@@ -32,6 +32,54 @@ pub struct Vfs {
     /// The `kf_file_fsid` it was first found by, or [`VNOVAL`] when it was
     /// found by path alone (a nullfs mount's lower layer).
     pub fsid: u64,
+}
+
+/// `readvfs()`'s list of the file systems found so far (`Lvfs`,
+/// `dmnt.c:195-260`), kept for the run.
+#[derive(Debug, Default)]
+pub struct VfsList(std::cell::RefCell<Vec<Vfs>>);
+
+impl VfsList {
+    /// `readvfs(fsid, path)`: the entry first found by `fsid`, if there is
+    /// an `fsid` to find one by; else, where there is a path, the file
+    /// system `statfs` says it is on, which is the entry already listed
+    /// under the same two names (and then that entry's `fsid` is the row's,
+    /// [`VNOVAL`] included), or a new one, recorded under `fsid`. A path
+    /// that cannot be `statfs`ed is on none, and is asked again next time.
+    pub fn find(
+        &self,
+        fsid: u64,
+        path: &[u8],
+        statfs: &dyn Fn(&[u8]) -> Option<crate::kinfo::StatFs>,
+    ) -> Option<Vfs> {
+        if fsid != VNOVAL {
+            if let Some(v) = self.0.borrow().iter().find(|v| v.fsid == fsid) {
+                return Some(v.clone());
+            }
+        }
+        if path.is_empty() {
+            return None;
+        }
+        let m = statfs(path)?;
+        let mut list = self.0.borrow_mut();
+        if let Some(v) = list
+            .iter()
+            .find(|v| v.fsname == m.mntfrom && v.dir == m.mnton)
+        {
+            return Some(v.clone());
+        }
+        // `MFSNAMELEN - 1` bytes of the type's name, at most (`:243-246`).
+        let mut typnm = m.fstypename;
+        typnm.truncate(15);
+        let v = Vfs {
+            dir: m.mnton,
+            fsname: m.mntfrom,
+            typnm,
+            fsid,
+        };
+        list.push(v.clone());
+        Some(v)
+    }
 }
 
 /// What a row needs from outside its record.
@@ -59,16 +107,35 @@ pub trait Env {
     /// `kern.file`'s record of `pid`'s `fd` (the C's `bsearch()` of its
     /// `xfile` list, `dproc.c:248-253`).
     fn xfile(&self, pid: i32, fd: i32) -> Option<XFile>;
+    /// A row on device `dev` was typed an NFS file (`Ntype = N_NFS`,
+    /// `dnode.c:364`): what `-N` selects (`:524`), by the file system each
+    /// vnode is on and no mount table (DIVERGENCES 182).
+    fn nfs_file(&self, dev: u64);
 }
 
 /// What of the run's options a row is built under.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Opts {
-    /// `-i` was given (the C's `Selinet`): a pipe is then not processed.
+    /// The run asks about Internet files alone (the C's `Selinet`,
+    /// `main.c:1236-1240`): a pipe is then not processed (`dproc.c:202`).
     pub inet: bool,
     /// `+f` (or `-F`, or JSON) asks for the file structure: FILE-FLAG's
     /// flags on each numbered row, and [`file_struct`] (DIVERGENCES 142).
     pub file_struct: bool,
+}
+
+impl Opts {
+    /// The options a run's rows are built under. `inet` is `Selinet`, not
+    /// `-i` given: with another selector beside it (`-u tester -i TCP:1`)
+    /// the C processes a pipe as ever, and a process the other selector
+    /// lists shows its pipes (measured on FreeBSD 14.5; lsof-rs had left
+    /// them blank rows, typed `0000`).
+    pub fn of(sel: &lsof_core::selection::Selection) -> Opts {
+        Opts {
+            inet: sel.inet_only(),
+            file_struct: sel.file_struct,
+        }
+    }
 }
 
 /// A kernel address as wide as the C's `KA_T`, a `u_long` (`dlsof.h`): on
@@ -101,6 +168,69 @@ pub fn file_struct(k: &KFile, xfile: Option<XFile>) -> FileStruct {
         count: Some(i64::from(k.ref_count())),
         addr: xfile.map(|x| ka(x.file)),
         node: xfile.map(|x| ka(if vnode { x.vnode } else { x.data })),
+    }
+}
+
+/// The listing's entries from the process table's records, as
+/// `gather_proc_info()` makes them (`dproc.c:432-477`) and `main()` orders
+/// them (`comppid()`): a record with no state, or a zombie's, is passed by;
+/// each of the rest is an entry, a process from `kern.proc.proc`, or under
+/// `-K` (`tasks`) one thread from `kern.proc.all`, its TID the record's
+/// `ki_tid` (`tid = Ftask ? (int)p->ki_tid : 0`, `:443`), so that every
+/// thread of every process is a task, a single-threaded process's one
+/// thread included. The dialect never sets a task's own command
+/// (`Lp->tcmd`): there is no TASKCMD. In PID order, a process's threads in
+/// TID order; a second record of one entry is not kept. A command that is
+/// not UTF-8 keeps its bytes ([`lsof_core::RawNames`]), which COMMAND, `-F c`
+/// and `-c` use, as the C prints and matches `ki_comm` itself; the Linux
+/// backend keeps them so too.
+pub fn entries(kprocs: Vec<KProc>, tasks: bool) -> Vec<Process> {
+    let mut procs: Vec<Process> = kprocs
+        .into_iter()
+        .filter(|k| k.stat != 0 && k.stat != SZOMB)
+        .filter_map(|k| {
+            let raw_names = std::str::from_utf8(&k.comm).is_err().then(|| {
+                Box::new(lsof_core::RawNames {
+                    command: Some(k.comm.clone().into_boxed_slice()),
+                    login: None,
+                    task_command: None,
+                })
+            });
+            Some(Process {
+                pid: u32::try_from(k.pid).ok()?,
+                ppid: u32::try_from(k.ppid).ok(),
+                command: String::from_utf8_lossy(&k.comm).into_owned(),
+                // Asked as it is printed (`Backend::login_name`).
+                user: None,
+                // `if (Lp->tid)`: a TID of 0 is no task's.
+                tid: u32::try_from(k.tid).ok().filter(|&t| tasks && t != 0),
+                task_command: None,
+                uid: Some(k.uid),
+                pgid: u32::try_from(k.pgid).ok(),
+                files: Vec::new().into(),
+                endpoint_peer: false,
+                unlisted: false,
+                raw_names,
+                file_structs: None,
+            })
+        })
+        .collect();
+    procs.sort_by_key(|p| (p.pid, p.tid));
+    procs.dedup_by_key(|p| (p.pid, p.tid));
+    procs
+}
+
+/// `process_file_descriptors()`'s first pass (`dproc.c:238-244`): before any
+/// row of a process is made, the file system of each of its vnodes is looked
+/// up, a special's whatever its kind, "as files w/o paths may need it from
+/// other files with paths on the same fs". So a file with no path is named
+/// by its file system when a later record of the same process has a path on
+/// it, where the rows alone, made in order, would not have found it yet.
+pub fn precache_vfs(files: &[KFile], env: &dyn Env) {
+    for k in files {
+        if k.fd() < 0 || matches!(k.kind(), kf::TYPE_FIFO | kf::TYPE_VNODE) {
+            let _ = env.vfs(k.file_fsid(), k.path());
+        }
     }
 }
 
@@ -282,6 +412,9 @@ fn vnode(f: &mut OpenFile, k: &KFile, pid: i32, env: &dyn Env) {
         }
     };
     let dev = (fsid != VNOVAL).then_some(fsid);
+    if let (Ntype::Nfs, Some(dev)) = (ntype, dev) {
+        env.nfs_file(dev);
+    }
     let rdev = matches!(vtype, kf::VTYPE_VCHR | kf::VTYPE_VBLK).then(|| k.file_rdev());
     let mut inode = (k.file_fileid() != VNOVAL).then(|| k.file_fileid());
     // `find_ch_ino()` (`dnode.c:580`, `lib/fino.c:97`): a character device
@@ -458,11 +591,52 @@ fn pts(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
     }
 }
 
-fn is_v4_mapped(ip: &IpAddr) -> Option<IpAddr> {
-    match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4),
-        IpAddr::V4(_) => None,
+/// The ends `process_socket()` enters for an Internet socket it found a PCB
+/// for (`dsock.c:452-557`), local and foreign, as the C built by the
+/// system's compiler runs (measured on FreeBSD 14.5, clang 21.1.8 `-O2`;
+/// DIVERGENCES 180):
+///
+/// * the local end, always: `la` is the record's address, whatever it holds;
+/// * an IPv4 socket's foreign end, always too. The source tests it
+///   (`:532-536`: not `INADDR_ANY`, or a port), but the branch not taken
+///   leaves `fp` uninitialised where `ent_inaddr()` is then handed it, and
+///   the compiler keeps the taken branch alone: the binary has no test;
+/// * an IPv6 socket's foreign end unless its address is `::` and its port 0
+///   (`:486-490`, which the binary does test);
+/// * and where an IPv6 socket's local end, or its foreign one if entered, is
+///   an IPv4 address mapped in IPv6, each end entered is read as IPv4, its
+///   last four bytes whatever the rest (`IPv6_2_IPv4()`, `:539-551`).
+///
+/// A sockaddr the record is too short to hold reads as zeros, as every field
+/// past a record's end does.
+fn entered_ends(sa_local: &[u8], sa_peer: &[u8], domain: i32) -> [Option<SocketAddr>; 2] {
+    let zero = || {
+        let ip = if domain == sock::AF_INET {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        };
+        SocketAddr::new(ip, 0)
+    };
+    let local = inet_addr(sa_local, domain).unwrap_or_else(zero);
+    let peer = inet_addr(sa_peer, domain).unwrap_or_else(zero);
+    let entered = domain == sock::AF_INET || !peer.ip().is_unspecified() || peer.port() != 0;
+    let remote = entered.then_some(peer);
+    let mapped = |a: &SocketAddr| matches!(a.ip(), IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some());
+    if !(mapped(&local) || remote.as_ref().is_some_and(mapped)) {
+        return [Some(local), remote];
     }
+    let v4 = |a: SocketAddr| match a.ip() {
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(o[12], o[13], o[14], o[15])),
+                a.port(),
+            )
+        }
+        IpAddr::V4(_) => a,
+    };
+    [Some(v4(local)), remote.map(v4)]
 }
 
 /// `IPPROTO_TCP`.
@@ -534,22 +708,13 @@ fn socket(f: &mut OpenFile, k: &KFile, env: &dyn Env) {
                 return;
             };
             f.device = Some(kptr(k.sock_pcb()));
-            let local = inet_addr(k.sa_local(), domain);
-            let remote = inet_addr(k.sa_peer(), domain)
-                .filter(|a| !a.ip().is_unspecified() || a.port() != 0);
-            // An IPv4 address mapped in IPv6 is printed as IPv4.
-            let map = |a: SocketAddr| match is_v4_mapped(&a.ip()) {
-                Some(v4) => SocketAddr::new(v4, a.port()),
-                None => a,
-            };
-            let mapped = local.is_some_and(|a| is_v4_mapped(&a.ip()).is_some())
-                || remote.is_some_and(|a| is_v4_mapped(&a.ip()).is_some());
-            info.local = if mapped { local.map(map) } else { local };
-            info.remote = if mapped { remote.map(map) } else { remote };
+            [info.local, info.remote] = entered_ends(k.sa_local(), k.sa_peer(), domain);
             if protocol == Protocol::Tcp {
                 info.state = pcb.t_state.and_then(tcp_state).map(SockState::Tcp);
             }
-            f.name = info.display_name(false, false);
+            // `printinaddr()`'s text of the ends entered (`print.c`), with
+            // no name looked up: `*` for an unspecified host and for port 0.
+            f.name = lsof_core::sockname::SocketNames::numeric(&info);
             f.socket = Some(Box::new(info));
         }
         sock::AF_ROUTE => {
@@ -629,6 +794,7 @@ mod tests {
         devs: HashMap<u64, String>,
         xfiles: HashMap<(i32, i32), XFile>,
         pts_seen: std::cell::Cell<bool>,
+        nfs: std::cell::RefCell<Vec<u64>>,
     }
 
     impl Env for Fake {
@@ -664,6 +830,9 @@ mod tests {
         }
         fn xfile(&self, pid: i32, fd: i32) -> Option<XFile> {
             self.xfiles.get(&(pid, fd)).copied()
+        }
+        fn nfs_file(&self, dev: u64) {
+            self.nfs.borrow_mut().push(dev);
         }
     }
 
@@ -861,6 +1030,298 @@ mod tests {
         }
     }
 
+    fn kproc(pid: i32, tid: i32, stat: u8, comm: &str) -> KProc {
+        KProc {
+            pid,
+            ppid: 1,
+            pgid: pid,
+            uid: 1001,
+            stat,
+            comm: comm.as_bytes().to_vec(),
+            tid,
+        }
+    }
+
+    /// A command that is not UTF-8 keeps its bytes, which COMMAND, `-F c` and
+    /// `-c` read, and its text is the lossy one (JSON). Measured on FreeBSD
+    /// 14.5 with processes named `z\xff\xfe` and `q\xe6\x97`: the C prints
+    /// and matches the bytes.
+    #[test]
+    fn a_command_that_is_not_utf8_keeps_its_bytes() {
+        let mut bad = kproc(10, 0, 2, "");
+        bad.comm = b"z\xff\xfe".to_vec();
+        let mut cut = kproc(11, 0, 2, "");
+        cut.comm = b"q\xe6\x97".to_vec();
+        let procs = entries(vec![bad, cut, kproc(12, 0, 2, "caf\u{e9}")], false);
+        assert_eq!(procs[0].command_bytes(), b"z\xff\xfe");
+        assert_eq!(procs[0].command, "z\u{fffd}\u{fffd}");
+        assert_eq!(procs[1].command_bytes(), b"q\xe6\x97");
+        assert_eq!(procs[2].command_bytes(), "caf\u{e9}".as_bytes());
+        assert!(procs[2].raw_names.is_none());
+        // `-c /^q.$/` and `/^z..$/` match neither, as FreeBSD's libc says.
+        for (expression, command) in [("^q.$", 1), ("^z..$", 0), ("\u{fffd}", 0), ("\u{fffd}", 1)] {
+            let regex = lsof_core::posix_regex::CommandRegex::new_in(
+                lsof_core::posix_regex::Dialect::FreeBsd,
+                expression.as_bytes(),
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(
+                !regex.is_match(procs[command].command_bytes()),
+                "{expression}"
+            );
+        }
+    }
+
+    /// Measured on FreeBSD 14.5 with a four-thread process: `-K` lists each
+    /// thread as an entry with its TID (`threads 1647 100152 …`, `… 102740
+    /// …`), in PID then TID order, a single-threaded process's one thread
+    /// too (`sleep 6883 100101`), and no entry has a task command. Without
+    /// `-K` a process is one entry and has no TID, whatever `ki_tid` holds.
+    #[test]
+    fn under_dash_k_every_thread_is_an_entry_in_pid_and_tid_order() {
+        let table = || {
+            vec![
+                kproc(1647, 102_741, 2, "threads"),
+                kproc(1647, 100_152, 2, "threads"),
+                kproc(6883, 100_101, 2, "sleep"),
+                kproc(1647, 102_740, 2, "threads"),
+                // A zombie, a record with no state, a PID that is none.
+                kproc(50, 100_050, SZOMB, "gone"),
+                kproc(51, 100_051, 0, "new"),
+                kproc(-1, 100_052, 2, "bad"),
+                // The kernel's process, and a second record of one thread.
+                kproc(0, 100_000, 2, "kernel"),
+                kproc(1647, 102_740, 2, "threads"),
+                // A thread ID of 0 is no task's (`if (Lp->tid)`).
+                kproc(77, 0, 2, "odd"),
+            ]
+        };
+        let ids = |p: &[Process]| -> Vec<(u32, Option<u32>)> {
+            p.iter().map(|p| (p.pid, p.tid)).collect()
+        };
+        let tasks = entries(table(), true);
+        assert_eq!(
+            ids(&tasks),
+            [
+                (0, Some(100_000)),
+                (77, None),
+                (1647, Some(100_152)),
+                (1647, Some(102_740)),
+                (1647, Some(102_741)),
+                (6883, Some(100_101)),
+            ]
+        );
+        assert!(tasks.iter().all(|p| p.task_command.is_none()));
+        assert_eq!(tasks[2].command, "threads");
+        assert_eq!(
+            (tasks[2].ppid, tasks[2].pgid, tasks[2].uid),
+            (Some(1), Some(1647), Some(1001))
+        );
+        // No `-K`: a process each, in PID order, and no TID.
+        let procs = entries(table(), false);
+        assert_eq!(
+            ids(&procs),
+            [(0, None), (77, None), (1647, None), (6883, None)]
+        );
+    }
+
+    fn statfs_of(ty: &str, from: &str, on: &str) -> crate::kinfo::StatFs {
+        crate::kinfo::StatFs {
+            ftype: 1,
+            fsid0: 0,
+            fstypename: ty.into(),
+            mntfrom: from.into(),
+            mnton: on.into(),
+        }
+    }
+
+    /// `readvfs()`: by `fsid` among those found, else by `statfs(path)`, an
+    /// entry already listed under the same names being that entry, its
+    /// `fsid` with it.
+    #[test]
+    fn a_file_system_is_found_by_fsid_then_by_path() {
+        let calls = std::cell::RefCell::new(Vec::<Vec<u8>>::new());
+        let statfs = |path: &[u8]| {
+            calls.borrow_mut().push(path.to_vec());
+            if path.starts_with(b"/gone") {
+                None
+            } else if path.starts_with(b"/mnt") {
+                Some(statfs_of("a-type-name-of-16", "srv:/x", "/mnt"))
+            } else {
+                Some(statfs_of("ufs", "/dev/gpt/rootfs", "/"))
+            }
+        };
+        let list = VfsList::default();
+        // No path and nothing found yet: none, and nothing asked.
+        assert_eq!(list.find(0x3d, b"", &statfs), None);
+        assert!(calls.borrow().is_empty());
+        // By path: recorded under the `fsid` asked with.
+        let root = list.find(0x3d, b"/etc/passwd", &statfs).unwrap();
+        assert_eq!(
+            (&root.dir[..], &root.fsname[..], &root.typnm[..], root.fsid),
+            (&b"/"[..], &b"/dev/gpt/rootfs"[..], &b"ufs"[..], 0x3d)
+        );
+        assert_eq!(calls.borrow().len(), 1);
+        // By `fsid` now, path or none, and no `statfs`.
+        assert_eq!(list.find(0x3d, b"", &statfs), Some(root.clone()));
+        assert_eq!(list.find(0x3d, b"/bin/sh", &statfs), Some(root.clone()));
+        assert_eq!(calls.borrow().len(), 1);
+        // With no `fsid` (a nullfs mount's lower layer): by path, and the
+        // entry listed under the same names, with the `fsid` it has.
+        assert_eq!(list.find(VNOVAL, b"/usr/bin", &statfs), Some(root.clone()));
+        assert_eq!(list.find(VNOVAL, b"", &statfs), None);
+        // Another `fsid` whose path is on the same file system: that entry
+        // too, and its `fsid` is the row's from then on.
+        assert_eq!(
+            list.find(0x99, b"/var", &statfs).map(|v| v.fsid),
+            Some(0x3d)
+        );
+        // Found first with no `fsid`: listed with none, which a row found by
+        // the same names then takes.
+        let nfs = list.find(VNOVAL, b"/mnt/f", &statfs).unwrap();
+        assert_eq!(nfs.fsid, VNOVAL);
+        assert_eq!(nfs.typnm, b"a-type-name-of-", "MFSNAMELEN - 1 bytes");
+        assert_eq!(
+            list.find(0x77, b"/mnt/g", &statfs).map(|v| v.fsid),
+            Some(VNOVAL)
+        );
+        // A path that cannot be `statfs`ed is on none, and is asked again.
+        let before = calls.borrow().len();
+        assert_eq!(list.find(0x55, b"/gone/x", &statfs), None);
+        assert_eq!(list.find(0x55, b"/gone/x", &statfs), None);
+        assert_eq!(calls.borrow().len(), before + 2);
+        // No `fsid` and no path finds nothing, though an entry has none.
+        assert_eq!(list.find(VNOVAL, b"", &statfs), None);
+        // An entry is the one of both names: the same source mounted on
+        // another directory, and another source on the same directory, are
+        // each their own.
+        let mounts = |path: &[u8]| {
+            Some(match path {
+                b"/a/x" => statfs_of("tmpfs", "tmpfs", "/a"),
+                b"/b/x" => statfs_of("tmpfs", "tmpfs", "/b"),
+                _ => statfs_of("ufs", "/dev/other", "/a"),
+            })
+        };
+        let list = VfsList::default();
+        let fsids = [
+            list.find(1, b"/a/x", &mounts).map(|v| v.fsid),
+            list.find(2, b"/b/x", &mounts).map(|v| v.fsid),
+            list.find(3, b"/a/y", &mounts).map(|v| v.fsid),
+        ];
+        assert_eq!(fsids, [Some(1), Some(2), Some(3)]);
+    }
+
+    /// An [`Env`] over a [`VfsList`] and a table of mounts: what the live
+    /// one is, with no system call.
+    #[derive(Default)]
+    struct Listed {
+        list: VfsList,
+        nfs: std::cell::RefCell<Vec<u64>>,
+    }
+
+    impl Env for Listed {
+        fn vfs(&self, fsid: u64, path: &[u8]) -> Option<Vfs> {
+            self.list.find(fsid, path, &|path| {
+                if path.starts_with(b"/net") {
+                    Some(statfs_of("nfs", "srv:/export", "/net"))
+                } else {
+                    Some(statfs_of("ufs", "/dev/gpt/rootfs", "/"))
+                }
+            })
+        }
+        fn lock(&self, _: i32, _: u64, _: u64) -> Option<LockKind> {
+            None
+        }
+        fn pcb(&self, _: i32, _: i32, _: u64) -> Option<Pcb> {
+            None
+        }
+        fn dev_name(&self, _: u64, _: Option<u64>) -> Option<String> {
+            None
+        }
+        fn dev_inode(&self, _: u64) -> Option<u64> {
+            None
+        }
+        fn dev_dev(&self) -> Option<u64> {
+            Some(0x5a)
+        }
+        fn pts_seen(&self) {}
+        fn xfile(&self, _: i32, _: i32) -> Option<XFile> {
+            None
+        }
+        fn nfs_file(&self, dev: u64) {
+            self.nfs.borrow_mut().push(dev);
+        }
+    }
+
+    /// `process_file_descriptors()` looks up every vnode's file system
+    /// before it makes a row, so a file with no path is named by its file
+    /// system when a later record of the process has a path on it. Measured
+    /// on FreeBSD 14.5: `sh … 1w VREG 0,61 13877 2249471 / (/dev/gpt/rootfs)`,
+    /// a descriptor with no path.
+    #[test]
+    fn a_file_with_no_path_is_named_by_a_later_files_file_system() {
+        let mut nameless = vnode_rec(1, kf::VTYPE_VREG, b"");
+        put(&mut nameless, kf::FILE_FSID, &0x3du64.to_ne_bytes());
+        let mut named = vnode_rec(3, kf::VTYPE_VREG, b"/etc/passwd");
+        put(&mut named, kf::FILE_FSID, &0x3du64.to_ne_bytes());
+        let files = [KFile::from_bytes(&nameless), KFile::from_bytes(&named)];
+        // The rows alone, in order: the first finds no file system.
+        let env = Listed::default();
+        let f = numbered(&files[0], 7, &env, Opts::default());
+        assert_eq!((f.name.as_str(), f.device.as_deref()), ("", Some("0,61")));
+        // After the first pass it is found by its `fsid`.
+        let env = Listed::default();
+        precache_vfs(&files, &env);
+        let f = numbered(&files[0], 7, &env, Opts::default());
+        assert_eq!(f.name, "/ (/dev/gpt/rootfs)");
+        assert_eq!(f.base_name(), None, "printed, not Lf->nm");
+        // The pass is of vnodes, FIFOs and every special; a socket's or a
+        // pipe's record has no file system to look up.
+        let env = Listed::default();
+        let mut sock = sock_rec(sock::AF_INET, sock::SOCK_STREAM, 6, 1);
+        put(&mut sock, kf::PATH, b"/x");
+        precache_vfs(&[KFile::from_bytes(&sock)], &env);
+        assert_eq!(env.list.find(0, b"", &|_| None), None, "nothing was listed");
+        let fifo = kf_rec(kf::TYPE_FIFO, 5, b"/tmp/f");
+        let vnode = kf_rec(kf::TYPE_VNODE, 6, b"/tmp/v");
+        // A special is looked up for its negative number, whatever its kind.
+        let cwd = kf_rec(0, kf::FD_CWD, b"/home");
+        for rec in [fifo, vnode, cwd] {
+            let env = Listed::default();
+            precache_vfs(&[KFile::from_bytes(&rec)], &env);
+            assert!(env.list.find(0, b"", &|_| None).is_some());
+        }
+    }
+
+    /// `-N` goes by the file system each vnode is on (`Ntype = N_NFS`): a
+    /// row typed so tells its device, and no other row does.
+    #[test]
+    fn an_nfs_file_tells_its_device() {
+        let env = Listed::default();
+        let mut on_nfs = vnode_rec(3, kf::VTYPE_VREG, b"/net/f");
+        put(
+            &mut on_nfs,
+            kf::FILE_FSID,
+            &0x1234_5678_9abcu64.to_ne_bytes(),
+        );
+        let f = numbered(&KFile::from_bytes(&on_nfs), 7, &env, Opts::default());
+        assert_eq!(f.name, "/net/f (srv:/export)");
+        assert_eq!(f.size, Some(4096), "an NFS file's size, whatever its type");
+        assert_eq!(*env.nfs.borrow(), [0x1234_5678_9abc]);
+        let local = vnode_rec(4, kf::VTYPE_VREG, b"/etc/motd");
+        let _ = numbered(&KFile::from_bytes(&local), 7, &env, Opts::default());
+        assert_eq!(env.nfs.borrow().len(), 1, "a ufs file is no NFS file");
+        // An NFS file with no device (found by path alone) tells none.
+        let env = Listed::default();
+        let mut nodev = vnode_rec(5, kf::VTYPE_VREG, b"/net/g");
+        put(&mut nodev, kf::FILE_FSID, &VNOVAL.to_ne_bytes());
+        let f = numbered(&KFile::from_bytes(&nodev), 7, &env, Opts::default());
+        assert_eq!((f.device, f.name.as_str()), (None, "/net/g (srv:/export)"));
+        assert!(env.nfs.borrow().is_empty());
+    }
+
     fn sock_rec(domain: i32, ty: i32, proto: i32, pcb: u64) -> Vec<u8> {
         let mut r = kf_rec(kf::TYPE_SOCKET, 5, b"");
         put(&mut r, kf::REF_COUNT, &1i32.to_ne_bytes());
@@ -898,7 +1359,8 @@ mod tests {
         let f = numbered(&KFile::from_bytes(&r), 1, &env, Opts::default());
         assert_eq!(f.file_type, FileType::Ipv4);
         assert_eq!(f.node.as_deref(), Some("TCP"));
-        assert_eq!(f.name, "*:22");
+        // An IPv4 socket's foreign end is entered whatever it holds.
+        assert_eq!(f.name, "*:22->*:*");
         assert_eq!(f.size, Some(7), "read and write: both queues");
         let s = f.socket.as_deref().unwrap();
         assert_eq!(s.state.map(SockState::as_str), Some("LISTEN"));
@@ -958,6 +1420,267 @@ mod tests {
         let f = numbered(&KFile::from_bytes(&r), 1, &env, Opts::default());
         assert_eq!(f.file_type, FileType::Ipv6);
         assert_eq!(f.name, "10.0.0.1:22->10.0.0.2:50000");
+    }
+
+    /// A `sockaddr_in` and a `sockaddr_in6` as the kernel fills them.
+    fn sa4(ip: [u8; 4], port: u16) -> [u8; 16] {
+        let mut sa = [0u8; 16];
+        sa[0] = 16;
+        sa[1] = 2;
+        put(&mut sa, 2, &port.to_be_bytes());
+        put(&mut sa, 4, &ip);
+        sa
+    }
+
+    fn sa6(ip: &str, port: u16) -> [u8; 28] {
+        let ip: Ipv6Addr = ip.parse().unwrap();
+        let mut sa = [0u8; 28];
+        sa[0] = 28;
+        sa[1] = 28;
+        put(&mut sa, 2, &port.to_be_bytes());
+        put(&mut sa, 8, &ip.octets());
+        sa
+    }
+
+    /// The row of a socket of `domain` and `proto` whose PCB the lists hold,
+    /// with these sockaddrs in its record.
+    fn inet_row(domain: i32, proto: i32, local: &[u8], peer: &[u8]) -> OpenFile {
+        let mut env = Fake::default();
+        env.pcbs.insert(
+            0x50,
+            Pcb {
+                so: 5,
+                t_state: Some(0),
+                ..Pcb::default()
+            },
+        );
+        let ty = if proto == 6 {
+            sock::SOCK_STREAM
+        } else {
+            sock::SOCK_DGRAM
+        };
+        let mut r = sock_rec(domain, ty, proto, 0x50);
+        put(&mut r, kf::SA_LOCAL, local);
+        put(&mut r, kf::SA_PEER, peer);
+        numbered(&KFile::from_bytes(&r), 1, &env, Opts::default())
+    }
+
+    fn ends(f: &OpenFile) -> [Option<String>; 2] {
+        let s = f.socket.as_deref().expect("a socket row");
+        [s.local, s.remote].map(|a| a.map(|a| a.to_string()))
+    }
+
+    /// Measured against the C on FreeBSD 14.5 (clang 21.1.8), a fixture
+    /// holding each socket: an IPv4 socket's NAME always has its foreign
+    /// end, `*:*` where there is none (a listener, an unbound socket, an
+    /// unconnected UDP socket), and port 0 is `*` (DIVERGENCES 180).
+    #[test]
+    fn an_ipv4_socket_always_shows_its_foreign_end() {
+        let zero = sa4([0; 4], 0);
+        for (proto, local, peer, name) in [
+            (6, zero, zero, "*:*->*:*"),
+            (6, sa4([127, 0, 0, 1], 41000), zero, "127.0.0.1:41000->*:*"),
+            (6, sa4([0; 4], 41008), zero, "*:41008->*:*"),
+            (
+                6,
+                sa4([127, 0, 0, 1], 51893),
+                sa4([127, 0, 0, 1], 41000),
+                "127.0.0.1:51893->127.0.0.1:41000",
+            ),
+            (17, zero, zero, "*:*->*:*"),
+            (17, sa4([127, 0, 0, 1], 41001), zero, "127.0.0.1:41001->*:*"),
+            (17, sa4([0; 4], 514), zero, "*:514->*:*"),
+            (
+                17,
+                sa4([127, 0, 0, 1], 42115),
+                sa4([127, 0, 0, 1], 41001),
+                "127.0.0.1:42115->127.0.0.1:41001",
+            ),
+        ] {
+            let f = inet_row(sock::AF_INET, proto, &local, &peer);
+            assert_eq!(f.name, name);
+            assert_eq!(f.file_type, FileType::Ipv4);
+            assert!(ends(&f)[1].is_some(), "{name}: the foreign end is entered");
+        }
+        // The far end of a listener is an end: 0.0.0.0, port 0.
+        let f = inet_row(sock::AF_INET, 6, &sa4([127, 0, 0, 1], 41000), &zero);
+        assert_eq!(
+            ends(&f),
+            [Some("127.0.0.1:41000".into()), Some("0.0.0.0:0".into())]
+        );
+        // A record with no sockaddr at all reads as zeros.
+        let f = inet_row(sock::AF_INET, 6, &[], &[]);
+        assert_eq!(f.name, "*:*->*:*");
+    }
+
+    /// An IPv6 socket's foreign end is entered unless it is `::` port 0
+    /// (measured: `TCP [::1]:41002 (LISTEN)`, `UDP *:*`, `UDP *:41007`).
+    #[test]
+    fn an_ipv6_socket_shows_a_foreign_end_that_is_one() {
+        let zero = sa6("::", 0);
+        for (proto, local, peer, name, far) in [
+            (6, zero, zero, "*:*", false),
+            (6, sa6("::1", 41002), zero, "[::1]:41002", false),
+            (6, sa6("::", 41009), zero, "*:41009", false),
+            (
+                6,
+                sa6("::1", 40324),
+                sa6("::1", 41002),
+                "[::1]:40324->[::1]:41002",
+                true,
+            ),
+            (17, zero, zero, "*:*", false),
+            (17, sa6("::1", 41003), zero, "[::1]:41003", false),
+            (
+                17,
+                sa6("::1", 45806),
+                sa6("::1", 41003),
+                "[::1]:45806->[::1]:41003",
+                true,
+            ),
+            // An address with no port, and a port with no address: each an
+            // end (`!IN6_IS_ADDR_UNSPECIFIED(…) || sin6_port`).
+            (
+                17,
+                sa6("::1", 1),
+                sa6("fe80::1", 0),
+                "[::1]:1->[fe80::1]:*",
+                true,
+            ),
+            (17, sa6("::1", 1), sa6("::", 9), "[::1]:1->*:9", true),
+        ] {
+            let f = inet_row(sock::AF_INET6, proto, &local, &peer);
+            assert_eq!(f.name, name);
+            assert_eq!(f.file_type, FileType::Ipv6);
+            assert_eq!(ends(&f)[1].is_some(), far, "{name}");
+        }
+        // A record with no sockaddr reads as zeros of the socket's family.
+        let f = inet_row(sock::AF_INET6, 17, &[], &[]);
+        assert_eq!(f.name, "*:*");
+        assert_eq!(ends(&f), [Some("[::]:0".into()), None]);
+    }
+
+    /// Where an IPv6 socket's end is an IPv4 address mapped in IPv6, each
+    /// end entered is read as IPv4, and the row stays IPv6. The kernel gives
+    /// an unconnected dual-stack socket bound to a mapped address the peer
+    /// `::ffff:0.0.0.0`, which is not `::`, so its foreign end is entered:
+    /// measured, `IPv6 … UDP 127.0.0.1:41005->*:*`.
+    #[test]
+    fn a_mapped_end_makes_both_ends_ipv4() {
+        let f = inet_row(
+            sock::AF_INET6,
+            17,
+            &sa6("::ffff:127.0.0.1", 41005),
+            &sa6("::ffff:0.0.0.0", 0),
+        );
+        assert_eq!(f.name, "127.0.0.1:41005->*:*");
+        assert_eq!(f.file_type, FileType::Ipv6);
+        assert_eq!(
+            ends(&f),
+            [Some("127.0.0.1:41005".into()), Some("0.0.0.0:0".into())]
+        );
+        let f = inet_row(
+            sock::AF_INET6,
+            6,
+            &sa6("::ffff:127.0.0.1", 41004),
+            &sa6("::ffff:127.0.0.1", 57490),
+        );
+        assert_eq!(f.name, "127.0.0.1:41004->127.0.0.1:57490");
+        // The local end mapped and no foreign end: IPv4, and no arrow.
+        let f = inet_row(
+            sock::AF_INET6,
+            17,
+            &sa6("::ffff:10.0.0.1", 53),
+            &sa6("::", 0),
+        );
+        assert_eq!(f.name, "10.0.0.1:53");
+        assert_eq!(ends(&f), [Some("10.0.0.1:53".into()), None]);
+        // `IPv6_2_IPv4()` takes an end's last four bytes whatever the rest:
+        // an end that is not mapped beside one that is.
+        let f = inet_row(
+            sock::AF_INET6,
+            17,
+            &sa6("::ffff:10.0.0.1", 53),
+            &sa6("::1", 9),
+        );
+        assert_eq!(f.name, "10.0.0.1:53->0.0.0.1:9");
+        let f = inet_row(
+            sock::AF_INET6,
+            17,
+            &sa6("2001:db8::102:304", 53),
+            &sa6("::ffff:10.0.0.2", 9),
+        );
+        assert_eq!(f.name, "1.2.3.4:53->10.0.0.2:9");
+        // The ends themselves are IPv4 then, not only their text: `-i`
+        // asks a specification's family of them.
+        assert_eq!(
+            ends(&f),
+            [Some("1.2.3.4:53".into()), Some("10.0.0.2:9".into())]
+        );
+        // No end mapped: IPv6 as it is.
+        let f = inet_row(sock::AF_INET6, 6, &sa6("::", 41004), &sa6("::", 0));
+        assert_eq!(f.name, "*:41004");
+        assert_eq!(ends(&f), [Some("[::]:41004".into()), None]);
+    }
+
+    /// A sockaddr the record is too short to hold reads as zeros of the
+    /// socket's family, as every field past a record's end does: an IPv4
+    /// socket then has both its ends, an IPv6 one its local end alone.
+    #[test]
+    fn a_sockaddr_the_record_cannot_hold_is_zeros_of_the_family() {
+        let text = |e: [Option<SocketAddr>; 2]| e.map(|a| a.map(|a| a.to_string()));
+        assert_eq!(
+            text(entered_ends(&[], &[], sock::AF_INET)),
+            [Some("0.0.0.0:0".into()), Some("0.0.0.0:0".into())]
+        );
+        assert_eq!(
+            text(entered_ends(&[], &[], sock::AF_INET6)),
+            [Some("[::]:0".into()), None]
+        );
+        // One the record holds beside one it cuts short.
+        assert_eq!(
+            text(entered_ends(
+                &sa6("::1", 7),
+                &sa6("::1", 9)[..20],
+                sock::AF_INET6
+            )),
+            [Some("[::1]:7".into()), None]
+        );
+        assert_eq!(
+            text(entered_ends(
+                &sa4([10, 0, 0, 1], 7)[..3],
+                &sa4([10, 0, 0, 2], 9),
+                sock::AF_INET
+            )),
+            [Some("0.0.0.0:0".into()), Some("10.0.0.2:9".into())]
+        );
+    }
+
+    /// An IPv6 address is written as FreeBSD's `inet_ntop()` writes it, in
+    /// brackets (`gethostnm()`): each measured on 14.5.
+    #[test]
+    fn an_ipv6_address_is_written_as_inet_ntop_writes_it() {
+        for (addr, text) in [
+            ("::1", "[::1]"),
+            ("::2", "[::2]"),
+            ("::ffff", "[::ffff]"),
+            ("::1:2", "[::0.1.0.2]"),
+            ("::1.2.3.4", "[::1.2.3.4]"),
+            ("::ffff:0:1.2.3.4", "[::ffff:0:102:304]"),
+            ("1:0:0:2:0:0:0:3", "[1:0:0:2::3]"),
+            ("1:0:0:2:0:0:3:4", "[1::2:0:0:3:4]"),
+            ("2001:db8::", "[2001:db8::]"),
+            ("2001:db8:0:1:1:1:1:1", "[2001:db8:0:1:1:1:1:1]"),
+            ("fe80::1", "[fe80::1]"),
+            ("::1:0:0:0", "[::1:0:0:0]"),
+            ("0:0:0:0:0:0:1:0", "[::0.1.0.0]"),
+            ("::fffe:1.2.3.4", "[::fffe:102:304]"),
+            ("a::", "[a::]"),
+            ("0:0:1::", "[0:0:1::]"),
+        ] {
+            let f = inet_row(sock::AF_INET6, 17, &sa6(addr, 7), &sa6("::", 0));
+            assert_eq!(f.name, format!("{text}:7"), "{addr}");
+        }
     }
 
     #[test]
@@ -1069,6 +1792,34 @@ mod tests {
         assert_eq!(f.file_type, FileType::NoType);
         #[cfg(target_pointer_width = "64")]
         assert_eq!(f.name, "0xfffff80000112233 file struct, ty=14");
+    }
+
+    /// A pipe is left unprocessed under `Selinet`, a run that asks about
+    /// Internet files and nothing else; `-i` beside another selector is not
+    /// one. Measured on FreeBSD 14.5: `lsof -u tester -i TCP:1` lists the
+    /// user's pipes as `PIPE` rows.
+    #[test]
+    fn a_runs_options_are_selinet_and_the_file_structure() {
+        use lsof_core::selection::Selection;
+        let mut inet = Selection::default();
+        inet.inet.add_all(None);
+        assert!(Opts::of(&inet).inet, "-i alone");
+        let mut with_user = Selection {
+            uids: vec![lsof_core::UidSel {
+                uid: 1001,
+                login: None,
+            }],
+            ..Default::default()
+        };
+        with_user.inet.add_all(None);
+        assert!(!Opts::of(&with_user).inet, "-u U -i");
+        assert!(!Opts::of(&Selection::default()).inet);
+        assert!(!Opts::of(&inet).file_struct);
+        let asked = Selection {
+            file_struct: true,
+            ..Default::default()
+        };
+        assert!(Opts::of(&asked).file_struct && !Opts::of(&asked).inet);
     }
 
     #[test]

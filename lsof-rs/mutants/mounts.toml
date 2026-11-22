@@ -319,11 +319,11 @@ file = "crates/lsof-cli/src/main.rs"
 old = '''        if table.is_none() && needs_table {
             table = Some(read_table(&sel));
         }
-        // A POSIX message queue'''
+        if !offsets_known {'''
 new = '''        if table.is_none() {
             table = Some(read_table(&sel));
         }
-        // A POSIX message queue'''
+        if !offsets_known {'''
 
 [[mutant]]
 name = "table-not-read-before-listing"
@@ -333,8 +333,8 @@ file = "crates/lsof-cli/src/main.rs"
 old = '''        if table.is_none() && needs_table {
             table = Some(read_table(&sel));
         }
-        // A POSIX message queue'''
-new = '''        // A POSIX message queue'''
+        if !offsets_known {'''
+new = '''        if !offsets_known {'''
 
 [[mutant]]
 name = "table-not-read-for-a-path"

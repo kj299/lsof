@@ -35,7 +35,7 @@ pub use backend::{
     MountTable, Privilege, UserLookup,
 };
 pub use model::{
-    AccessMode, BoundPath, BsdSocket, BsdXSocket, FdType, FileId, FileStruct, FileType,
+    AccessMode, BoundPath, BsdSocket, BsdXSocket, FdType, FileId, FileStruct, FileType, Files,
     NameAddition, OpenFile, Process, Protocol, RawNames, SockState, SocketInfo, TcpState,
     UnixState,
 };

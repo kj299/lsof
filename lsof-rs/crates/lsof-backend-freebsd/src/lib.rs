@@ -82,5 +82,7 @@ pub mod fuzz_api {
         files, inet_addr, locks, pcblist, procs, statfs_list, unix_path, xfiles, KFile, Pcb, XFile,
     };
     pub use crate::layout::{PROC_AMD64, PROC_I386, XINPCB, XTCPCB, XUNPCB};
-    pub use crate::rows::{file_struct, numbered, special, Env, Opts, Vfs};
+    pub use crate::rows::{
+        entries, file_struct, numbered, precache_vfs, special, Env, Opts, Vfs, VfsList,
+    };
 }

@@ -11,7 +11,121 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed — FreeBSD, written from the C's source (not yet run on FreeBSD)
+### Fixed — FreeBSD, after the two reviews of the third run (2026-11-21)
+A parity review and a safety review of the fixes below, in the same
+FreeBSD 14.5 guest; what they found, measured there before and after
+(DIVERGENCES "FreeBSD: the two reviews of the third run"):
+- **`-c /regex/i` is FreeBSD's `REG_ICASE`** (183): no case is folded while
+  matching; a letter with another case is the list of itself and its
+  `towlower()`/`towupper()`, by FreeBSD's own tables (2,880 characters,
+  `posix_regex/freebsd_case.rs`), and a list past ASCII takes a character
+  whose `towlower()` or `towupper()` it holds, as `CHIN()` does. `/İ/i` now
+  finds `i` (not `I`), `/^xK$/i` with the Kelvin sign no longer finds `xK`,
+  `[[:upper:]]` under `i` takes `ÿ` and not `ß`, and a back-reference is
+  compared byte for byte (`/\(a\)\1/bi` does not find `aA`). lsof-rs had
+  folded by Unicode's rules. A range that ends at U+0080 leaves it out, as
+  `CHaddrange()` does.
+- **A backslash before a letter alone is refused** (183): `\Ⅻ`, `\ⓐ` and
+  a combining mark, which Unicode calls alphabetic and FreeBSD's
+  `iswalpha()` does not, are the characters, where lsof-rs had said
+  `trailing backslash (\)`.
+- **A command that is not UTF-8 keeps its bytes** (140, 183): COMMAND,
+  `-F c` and `-c` read `ki_comm` itself (`z\xff\xfe`, and `/^q.$/` does
+  not match `q\xe6\x97`), as on Linux; it had been decoded lossily.
+- Measured against FreeBSD 14.5's libc: 2,708 expressions (543 new, for `i`
+  and the escapes) against 116 commands, 204,392 answers, every one asked
+  the same; the 2,000 not asked are each beside a word operator and a
+  character past ASCII (183 lists what is not reproduced: that, nesting 100
+  deep, the C's cost, the locale).
+- **Bounds** (the safety review's LOW-1): the FreeBSD grammar's recursion
+  guard, its nesting, cost and tree limits are tested, the guard by a
+  mutant; the fuzz target `posix_regex` reads one input byte for the
+  grammar, so FreeBSD's is fuzzed on Linux; the lists `i` writes out are
+  bounded (`CASE_WORK_LIMIT`).
+- **`-K`**: a thread's kept rows are copied alone, and a list is copied for
+  the naming only where a row is renamed (the safety review's INFO-1).
+
+### Changed — FreeBSD, after its first run beside the C (2026-11-21)
+lsof-rs ran on FreeBSD for the first time, beside the C lsof built from this
+tree: FreeBSD 14.5-RELEASE amd64 (UFS; an emulated guest), as a user and as
+root (`differential/freebsd-check.sh`, DIVERGENCES "FreeBSD: the first
+run"). What follows is what that changed; each is now the C's, measured.
+- **An Internet socket's far end** (DIVERGENCES 180): an IPv4 socket always
+  shows one, `*:*` where there is none (`TCP 127.0.0.1:39999->*:* (LISTEN)`,
+  `UDP *:514->*:*`), an IPv6 socket only a real one (`TCP [::1]:41002
+  (LISTEN)`), and a port of 0 is `*` (an unbound socket was `*:0`). `-i`
+  matches by the ends entered: `-i :0` selects an IPv4 listener, and `-i
+  4TCP` an IPv6 socket whose addresses are IPv4-mapped.
+- **No mount table and no helper process on a run that names no path**
+  (182): `lsof`, `-p`, `-u`, `-i`, `-U`, `-N` and `-K` read no mount, so
+  lsof no longer lists a helper and two pipes of its own, `-b -p PID` prints
+  no `avoiding …` line, and a mount that does not answer costs such a run
+  no `stat` or `readlink` of the mount table (each vnode's path is still
+  `statfs`ed in lsof itself, unbounded, as the C's is: row 143). `-N` goes by the file system each file is on. A path argument, or
+  `+d`/`+D`, reads the table and starts the helper, as the C forks its
+  child.
+- **`-K` lists every thread** (141): one entry a thread, its TID in a TID
+  column (no TASKCMD: FreeBSD's C names no task), `K` in `-F`, `tid` in
+  JSON; `-K` beside another selector ORs, as root the kernel's threads are
+  listed too. lsof-rs listed none and exited 1.
+- **`-D` is read as the C's device cache control** (148): `?`, `i`, `b`, `r`
+  and `u`, with the C's messages for what it refuses. lsof-rs still keeps no
+  cache file, by decision: `-D ?` reports no path, and the others change
+  nothing. It had been `unsupported option: -D`.
+- **FreeBSD's option letters are its C's** (183): `-e`, `+e`, `-E`, `+E`,
+  `-X` and `-Z` are `illegal option character`, `+M` and `-M` are read, and
+  `-s UDP:x` is `unknown -s protocol`.
+- **`-s TCP:` with `-i`** (181): with a state to include, the bare `-i`
+  lists the TCP sockets in it and no UDP socket.
+- **Smaller**: a process's pipes are no longer blank rows under `-i` beside
+  another selector (`-u U -i TCP:1`); `-K` and `-N` are located by a process
+  with no socket under `-a -U` or `-a -i`; `lsof -b /` says `avoiding
+  readlink(devfs)` for a mount source that is no path; a file with no path
+  is named by its file system when a later descriptor of the process names
+  it; a mount whose `stat` fails is assumed the device `f_fsid.val[0]` with
+  its sign.
+- **The helper's `/dev/null` cannot hold a run** (144): lsof opens it for
+  reading and writing, as the C opens `/dev/null` when it starts, and hands
+  it to the helper as descriptor 2. The open had been for writing alone,
+  which waits for ever where `/dev/null` is a FIFO (the opens, and the
+  helper's `2u`, measured on FreeBSD, DIVERGENCES 140).
+- Not changed, and recorded: the helper keeps a descriptor 2, `/dev/null`,
+  where the C's child has none (144); nothing is named without `-n -P`
+  (185).
+
+### Fixed — FreeBSD, after the two reviews of that work (2026-11-21)
+A parity review and a safety review of the changes above, each in the same
+FreeBSD 14.5 guest; what they found, now the C's (measured there,
+DIVERGENCES "FreeBSD: the two reviews of the first-run fixes"):
+- **`-s TCP:<state>` selects under the OR whatever `-i` says** (181): a
+  TCP socket in an included state is listed beside what the other selectors
+  list, in every process the C reads (`-s TCP:LISTEN -i UDP` lists the UDP
+  sockets and every listener; `-U -s TCP:LISTEN`, `-d 0 -s TCP:CLOSED`, `-s
+  TCP:LISTEN -i :9 -t` the same). lsof-rs had done so for the bare `-i`
+  alone. Linux is unchanged: its C gives a socket that mark only for `-i`.
+- **`-c /regex/` is read by FreeBSD libc's `regcomp()`** (183): Henry
+  Spencer's grammar, with no GNU operator (`\|`, `\+` and `\?` are the
+  characters, `\w`, `\s`, `\b` and the like `trailing backslash (\)`), an
+  empty expression or alternative refused (`empty (sub)expression`), `a**`
+  refused, a count at most 255, an unmatched `)` a character, FreeBSD's
+  classes (`[[:number:]]`, `[[:rune:]]`, …) and `[[:<:]]`/`[[:>:]]`, and its
+  `regerror()` words throughout. lsof-rs had read glibc's grammar there.
+  Measured against FreeBSD 14.5's libc: 2,165 expressions against 72
+  commands (`tests/posix_regex_freebsd.txt`), every answer asked the same;
+  1,908 of the 90,648, beside a character past ASCII (a word operator, a
+  class under `i`), were not asked (corrected: this said every answer was
+  measured; the next entry makes `i` FreeBSD's). Linux is unchanged.
+- **`-k` and `-m`** (149): followed by no word, or by one that opens with
+  `-` or `+`, each is the C's `-k not followed by path` (`-m …`), and that
+  word is read as options (`-k -p` then says `no process ID specified`).
+- **`-K` holds a process's files once** (141): every thread entry shares
+  its process's rows, where each had a copy; a run's memory was the threads
+  times the files (the safety review's LOW-1).
+- **No `3w` in lsof's own listing under `-r`**: standard output is written
+  through a duplicate of descriptor 1 made for each write, where one kept
+  for the run showed from the second cycle on.
+
+### Changed — FreeBSD, written from the C's source (2026-11-20; measured 2026-11-21, see above)
 - **`+f c`, `+f f`, `+f g`/`G` and `+f n`** (DIVERGENCES 142): FCT,
   FILE-ADDR, FILE-FLAG and NODE-ID columns, and `-F`'s `C`, `F`, `G` and `N`
   fields (in a bare `-F`'s set, and listed by `-F ?`), from each
@@ -56,8 +170,10 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   no longer waits on lsof's helper; and the numbers they took no longer
   count against lsof's descriptor limit. Done in `lsof-sigpipe`'s
   constructor, before the Rust runtime starts: `close_range(3, ~0U, 0)`,
-  else the descriptors `/proc/self/fd` lists, else every number below the
-  limit (1,048,576 at most). On FreeBSD, `closefrom(3)`.
+  else the descriptors `/proc/self/fd` lists, else every number from 3
+  below 1,048,576, whatever the descriptor limit is (one opened under a
+  higher soft limit keeps its number). On FreeBSD, `closefrom(3)` (from
+  source; not yet run there).
 - **With no usable `/dev/null`, every run exits 1 and prints nothing, as
   the C's does** (171): the C opens it before it reads an option, to put
   it on a closed stdin, stdout or stderr, and ends in silence where it
@@ -67,12 +183,31 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   (exit 134) inside the Rust runtime's start-up.
 - **`+m FILE` is asked of `access(2)` before it is read** (172), the real
   user's rights, as the C's `is_readable()` asks: where lsof's effective
-  user is another (a setuid installation, a wrapper that sets it), a
-  supplement the caller may not read is `WARNING: access FILE: Permission
-  denied` and none of its lines is quoted, where lsof-rs had read it; and
-  one the caller may read and the effective user may not is `can't
+  user is another (a wrapper that sets it; lsof-rs is never set-user-ID),
+  a supplement the caller may not read is `WARNING: access FILE:
+  Permission denied`, where lsof-rs had read it as the effective user;
+  and one the caller may read and the effective user may not is `can't
   open(FILE): Permission denied`, which lsof-rs had called an access
-  warning.
+  warning. The check is advisory, the C's own, in the C's order (check,
+  then open): a name changed between the two is opened all the same, in
+  both.
+- **With no `/proc`, or where lsof cannot tell a file's offset, `-o` and
+  `+f` are disregarded with the C's warnings** (177): `lsof: WARNING:
+  can't report offset; disregarding -o.` and the SIZE column, and `lsof:
+  WARNING: can't report file flags; disregarding +f.` with no FILE-FLAG
+  column, `-F` `o` or `G`, or JSON `offset` or `flags`, at the points the
+  C's start-up probe says them; muted by `-w` and `-t`. lsof-rs made no
+  probe. It asks `/proc/self/fdinfo`, so it succeeds in a pid namespace
+  that shares the outer `/proc`, where the C's fails.
+- **A FIFO at `/dev/null` no longer holds every run that starts the
+  helper** (123): the helper's stderr is `/dev/null` opened read and write
+  (`2u`), as lsof's own start-up opens it; it was opened for writing alone,
+  which waits on a FIFO for ever. The C lists there; so does lsof-rs.
+- **A FIFO or a device where `/proc/mounts` should be ends the run at
+  once** (175): `can't fopen(/proc/mounts, "r"): No such device or
+  address`, exit 1, where the C waits for ever on the FIFO and reads a
+  device such as `/dev/zero` until memory runs out; `/dev/null` there is
+  the empty table, as in the C.
 - **Messages** (stderr; exit status unchanged): the `-d` mixture message
   quotes 254 bytes of its item, as the C's buffer keeps (173); a character
   of several bytes among the letters of `-F`, `-T`, `-x` or `+f` is a line
@@ -82,7 +217,7 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   `can't fopen(/proc/mounts, "r"): No such file or directory`, the C's
   words, where lsof-rs said `can't fork` (175).
 - **Linux, eleven differences an audit against the C found** (DIVERGENCES
-  156-168; each now prints what lsof 4.99.6 prints):
+  156-166 and 168; each now prints what lsof 4.99.6 prints):
   - a descriptor on a **namespace file** (`/proc/PID/ns/net`, what
     container runtimes and `ip netns` hold) is NAME `net`, `mnt`, `pid`…,
     where lsof-rs printed the link whole, `net:[4026531833]` (156); a link
@@ -124,7 +259,14 @@ versions follow [SemVer](https://semver.org/spec/v2.0.0.html).
   - **`-c ^`**, an exclusion with no name, is accepted, as the C accepts
     it: it excludes every command, so nothing is listed and the run exits
     1, with `command not located: ` under `-V`. lsof-rs refused it:
-    `option -c^ requires a name` (168).
+    `option -c^ requires a name` (168);
+  - and, from the two reviews of that work: a **thread name that is not
+    UTF-8** is cut and escaped in TASKCMD from its own bytes, as COMMAND
+    is (`ab\xc3`, `\xff\xfe`), where the per-byte cut had split the U+FFFD
+    it was read as into `ab\xef` and `\xef\xbf` (93); and **fdinfo** is
+    read for the lines the C asks for, by the descriptor's link, and only
+    until it has them, as the C's `get_fdinfo()` reads it (161: no
+    kernel's file shows the difference, a forged one does).
 
   Recorded and not followed (164): run in a PID namespace whose `/proc`
   is the host's (`unshare -p -f` with no `--mount-proc`), the C takes

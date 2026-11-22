@@ -92,11 +92,64 @@ pub(crate) fn type_from_mode(mode: u32) -> FileType {
 /// file without a meaningful size — a device node, a FIFO — and what `-o`
 /// asks for on every file; it was the first fidelity gap the C-vs-Rust
 /// differential found, on its first fixture.
-fn fdinfo_for(base: &str, fd: &str) -> FdInfo {
+///
+/// `link` is the descriptor's link text, or `None` where it would not read:
+/// which lines are read at all depends on it, as in the C ([`fdinfo_wants`]).
+fn fdinfo_for(base: &str, fd: &str, link: Option<&[u8]>) -> FdInfo {
     match crate::text::read_lossy(format!("{base}/fdinfo/{fd}")) {
-        Some(info) => parse_fdinfo(&info),
+        Some(info) => parse_fdinfo(&info, fdinfo_wants(link)),
         None => FdInfo::default(),
     }
+}
+
+/// The lines of fdinfo the C asks `get_fdinfo()` for, one bit each, as its
+/// `FDINFO_*` (`dproc.c:39-52`).
+pub mod want {
+    /// `flags:`.
+    pub const FLAGS: u8 = 0x1;
+    /// `pos:`.
+    pub const POS: u8 = 0x2;
+    /// `eventfd-id:`.
+    pub const EVENTFD_ID: u8 = 0x4;
+    /// `tty-index:`.
+    pub const TTY_INDEX: u8 = 0x8;
+    /// `Pid:`.
+    pub const PID: u8 = 0x10;
+    /// `tfd:`.
+    pub const TFD: u8 = 0x20;
+    /// `FDINFO_BASE`: what every descriptor's read asks for.
+    pub const BASE: u8 = FLAGS | POS;
+}
+
+/// The C's `fdinfo_mask` for a numbered descriptor whose link reads `link`
+/// (`dproc.c:1229-1253`), `None` where it would not read: `flags:`, `pos:`
+/// and `tty-index:` always (this build has `HASPTYEPT`); `eventfd-id:` only
+/// where what follows the link's `:` (`getlinksrc()`'s rest) opens with
+/// `[eventf`, `tfd:` only where it opens with `[eventp`, and `Pid:` only
+/// where it opens with `[p` or the link is Linux 6.9's `pidfd:` with
+/// something after the colon (the node is still `N_REGLR` there: the C
+/// asks before `process_proc_node()` types it). A path, a link that would
+/// not read and one with no `:` have no rest.
+pub fn fdinfo_wants(link: Option<&[u8]>) -> u8 {
+    let mut wants = want::BASE | want::TTY_INDEX;
+    let Some(link) = link.filter(|l| l.first() != Some(&b'/')) else {
+        return wants;
+    };
+    let Some(colon) = link.iter().position(|&b| b == b':') else {
+        return wants;
+    };
+    let (source, rest) = (&link[..colon], &link[colon + 1..]);
+    if let Some(after) = rest.strip_prefix(b"[event") {
+        match after.first() {
+            Some(b'f') => wants |= want::EVENTFD_ID,
+            Some(b'p') => wants |= want::TFD,
+            _ => {}
+        }
+    }
+    if rest.starts_with(b"[p") || (!rest.is_empty() && source == b"pidfd") {
+        wants |= want::PID;
+    }
+    wants
 }
 
 /// `O_PATH`, as the kernel's `asm-generic/fcntl.h` defines it for x86_64 and
@@ -174,8 +227,11 @@ fn access_from_flags(flags: u32) -> AccessMode {
 
 /// The `tty-index:` of descriptor `fd` of `base` (`/proc/PID` or a task's
 /// directory), where it is a pseudoterminal master (DIVERGENCES 56).
+///
+/// A master's link is a path (`/dev/ptmx`, `/dev/pts/ptmx`), which has no
+/// rest, so its fdinfo is read for what the C reads it for any path.
 pub fn tty_index(base: &str, fd: u64) -> Option<u32> {
-    fdinfo_for(base, &fd.to_string()).tty_index
+    fdinfo_for(base, &fd.to_string(), None).tty_index
 }
 
 /// A field of a `/proc` line as the C's `strtoul(field, &ep, 0)` and
@@ -247,10 +303,19 @@ pub(crate) fn c_int(ul: u64) -> i32 {
 /// As the C's `get_fdinfo()` reads it (`dproc.c:480-575`): each line is cut
 /// into fields at its blanks and tabs (`get_fields()`), the first names the
 /// value and the second is it, read by `strtoul()` or `strtoull()` in base 0
-/// ([`c_strtoul`]); a line whose number the C refuses changes nothing, and a
-/// line that comes again replaces what the earlier one gave.
-pub fn parse_fdinfo(info: &str) -> FdInfo {
+/// ([`c_strtoul`]). Only the lines `wants` names are read
+/// ([`fdinfo_wants`]): an `eventfd-id:` in a pidfd's fdinfo is no id. A
+/// wanted line whose number the C refuses changes nothing, and one that
+/// comes again replaces what the earlier one gave, until the C stops: once
+/// every wanted line has been read, after the line that completed them; or,
+/// on an eventpoll, at the first wanted line that is not a `tfd:` past a
+/// `tfd:`, or at a `tfd:` that leaves all wanted read and the 32 kept
+/// (`dproc.c:494-506, 563-573`). What follows is not read: a `pos:` after a
+/// pseudoterminal master's `tty-index:` is none of its position.
+pub fn parse_fdinfo(info: &str, wants: u8) -> FdInfo {
     let mut out = FdInfo::default();
+    // `rv`: the wanted lines read so far.
+    let mut got = 0u8;
     // '\n' only, as `fgets()` ends a line: a '\r' before it is part of the
     // last field, and no number.
     for line in info.split('\n') {
@@ -258,29 +323,49 @@ pub fn parse_fdinfo(info: &str) -> FdInfo {
         let (Some(key), Some(value)) = (fields.next(), fields.next()) else {
             continue;
         };
-        let Some(ul) = (match key {
-            "flags:" | "pos:" | "eventfd-id:" | "tty-index:" | "Pid:" | "tfd:" => c_strtoul(value),
-            _ => None,
-        }) else {
+        let bit = match key {
+            "flags:" => want::FLAGS,
+            "pos:" => want::POS,
+            "eventfd-id:" => want::EVENTFD_ID,
+            "tty-index:" => want::TTY_INDEX,
+            "Pid:" => want::PID,
+            "tfd:" => want::TFD,
+            _ => continue,
+        };
+        if wants & bit == 0 {
+            continue;
+        }
+        let Some(ul) = c_strtoul(value) else {
             continue;
         };
-        match key {
-            "flags:" => {
+        got |= bit;
+        match bit {
+            want::FLAGS => {
                 // `fi->flags = (unsigned int)ul`.
                 let flags = (ul & 0xffff_ffff) as u32;
                 out.flags = Some(flags);
                 out.access = Some(access_from_flags(flags));
             }
-            "pos:" => out.pos = Some(ul),
-            "eventfd-id:" => out.eventfd_id = Some(c_int(ul)).filter(|&id| id != -1),
-            "tty-index:" => out.tty_index = u32::try_from(c_int(ul)).ok(),
-            "Pid:" => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),
+            want::POS => out.pos = Some(ul),
+            want::EVENTFD_ID => out.eventfd_id = Some(c_int(ul)).filter(|&id| id != -1),
+            want::TTY_INDEX => out.tty_index = u32::try_from(c_int(ul)).ok(),
+            want::PID => out.pidfd_pid = Some(c_int(ul)).filter(|&pid| pid != -1),
             // `tfd:  6 events: 1f data: ... pos:0 ino:28d1 sdev:9`
             _ => {
                 if out.tfds.len() < EPOLL_MAX_TFDS {
                     out.tfds.push(c_int(ul));
                 }
             }
+        }
+        let done = match bit {
+            want::FLAGS | want::POS => got == wants,
+            // "we can assume tfd lines are continuous": a wanted line after
+            // them ends the read.
+            want::TFD => got == wants && out.tfds.len() == EPOLL_MAX_TFDS,
+            _ => got == wants || got & want::TFD != 0,
+        };
+        if done {
+            break;
         }
     }
     // The C sorts before printing; fdinfo lists them most-recent first.
@@ -1444,14 +1529,21 @@ pub fn for_proc_dir(base: &str, pid: u32, uid: Option<u32>, ctx: &GatherCtx<'_>)
 
     for (num, name) in fds {
         let p = format!("{base}/fd/{name}");
-        let info = fdinfo_for(base, &name);
+        // The link first, as the C reads it (`getlinksrc()`), since which
+        // lines of fdinfo are read depends on it ([`fdinfo_wants`]).
+        let link = std::fs::read_link(&p);
+        let info = fdinfo_for(
+            base,
+            &name,
+            link.as_ref().ok().map(|t| t.as_os_str().as_bytes()),
+        );
         // What an lsof-rs helper opened for a call: the file a call could not
         // examine in time, which a `stat` here would wait on as the helper
         // does. Not listed (DIVERGENCES 123).
         if ctx.helpers.skips(pid, num, info.flags) {
             continue;
         }
-        let target = match std::fs::read_link(&p) {
+        let target = match link {
             Ok(target) => target,
             Err(e) => {
                 if report_unreadable {
@@ -1561,6 +1653,18 @@ mod tests {
     }
 
     use super::*;
+
+    /// The link text of a pidfd, an eventfd and an eventpoll, as the kernel
+    /// writes it: what [`fdinfo`] is handed for each.
+    const PIDFD: &str = "anon_inode:[pidfd]";
+    const EVENTFD: &str = "anon_inode:[eventfd]";
+    const EPOLL: &str = "anon_inode:[eventpoll]";
+
+    /// [`parse_fdinfo`] of `text`, as the C reads the fdinfo of a
+    /// descriptor whose link reads `link` ([`fdinfo_wants`]).
+    fn fdinfo(text: &str, link: &str) -> FdInfo {
+        parse_fdinfo(text, fdinfo_wants(Some(link.as_bytes())))
+    }
 
     /// What a path argument naming the file `md` describes finds it by: its
     /// `st_dev` and inode, a socket file's too (DIVERGENCES 101).
@@ -1812,10 +1916,14 @@ mod tests {
         // 1320-1328`). There is no test of the pid in that branch: a
         // process that has been reaped, `Pid:\t-1`, is `[pidfd:-1]`, where
         // an `anon_inode:[pidfd]` keeps its bare kind.
-        let live = parse_fdinfo(
+        let live = fdinfo(
             "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t99\nPid:\t4242\nNSpid:\t4242\n",
+            "pidfd:[99]",
         );
-        let reaped = parse_fdinfo("pos:\t0\nflags:\t02000002\nPid:\t-1\nNSpid:\t-1\n");
+        let reaped = fdinfo(
+            "pos:\t0\nflags:\t02000002\nPid:\t-1\nNSpid:\t-1\n",
+            "pidfd:[99]",
+        );
         let none = FdInfo::default();
         let reg = LinkNode::Regular;
         assert_eq!(name_for_target("pidfd:[99]", &live, reg), "[pidfd:4242]");
@@ -1862,7 +1970,7 @@ mod tests {
         assert_eq!(name_for_target("anon_inode:", &none, anon), "anon_inode");
         // A pseudoterminal master's slave index (DIVERGENCES 56), as the C's
         // `int`: past it, none.
-        let tty = |s: &str| parse_fdinfo(s).tty_index;
+        let tty = |s: &str| fdinfo(s, "/dev/ptmx").tty_index;
         assert_eq!(tty("pos:\t0\nflags:\t0102002\ntty-index:\t3\n"), Some(3));
         assert_eq!(tty("tty-index:\t2147483647\n"), Some(i32::MAX as u32));
         assert_eq!(tty("tty-index:\t2147483648\n"), None);
@@ -1870,28 +1978,32 @@ mod tests {
         assert_eq!(tty("tty-index:\tx\n"), None);
         assert_eq!(tty("pos:\t0\n"), None);
         // eventfd: the *id*, not the counter and not the fd number.
-        let ev = parse_fdinfo("pos:\t0\neventfd-count:\t7\neventfd-id: 6\n");
+        let ev = fdinfo(
+            "pos:\t0\neventfd-count:\t7\neventfd-id: 6\n",
+            "anon_inode:[eventfd]",
+        );
         assert_eq!(
             name_for_target("anon_inode:[eventfd]", &ev, anon),
             "[eventfd:6]"
         );
         // pidfd: the process it refers to.
-        let pf = parse_fdinfo("pos:\t0\nPid:\t4242\nNSpid:\t4242\n");
+        let pf = fdinfo("pos:\t0\nPid:\t4242\nNSpid:\t4242\n", PIDFD);
         assert_eq!(
             name_for_target("anon_inode:[pidfd]", &pf, anon),
             "[pidfd:4242]"
         );
         // A pid of 0 is a pid to the C (a process no pid names in lsof's
         // PID namespace).
-        let zero = parse_fdinfo("Pid:\t0\n");
+        let zero = fdinfo("Pid:\t0\n", PIDFD);
         assert_eq!(
             name_for_target("anon_inode:[pidfd]", &zero, anon),
             "[pidfd:0]"
         );
         // eventpoll: the watched fds, ascending, however fdinfo ordered them.
-        let ep = parse_fdinfo(
+        let ep = fdinfo(
             "pos:\t0\ntfd:        6 events: 1f data: 0 pos:0 ino:1 sdev:9\n\
              tfd:        4 events: 1f data: 0 pos:0 ino:2 sdev:9\n",
+            EPOLL,
         );
         assert_eq!(
             name_for_target("anon_inode:[eventpoll]", &ep, anon),
@@ -1922,8 +2034,9 @@ mod tests {
         // line is skipped, `fi.pid` stays -1 and nothing is put in
         // (`dproc.c:528-538, 1292-1295`): `[pidfd]`, measured, where lsof-rs
         // printed `[pidfd:-1]`.
-        let reaped = parse_fdinfo(
+        let reaped = fdinfo(
             "pos:\t0\nflags:\t02000002\nmnt_id:\t16\nino:\t155562\nPid:\t-1\nNSpid:\t-1\n",
+            PIDFD,
         );
         assert_eq!(reaped.pidfd_pid, None);
         assert_eq!(
@@ -1940,23 +2053,26 @@ mod tests {
             "18446744073709551614",
         ] {
             assert_eq!(
-                parse_fdinfo(&format!("Pid:\t{no}\n")).pidfd_pid,
+                fdinfo(&format!("Pid:\t{no}\n"), PIDFD).pidfd_pid,
                 None,
                 "{no}"
             );
         }
         // The low 32 bits, as the cast keeps them: 2^32 + 7 is pid 7.
-        assert_eq!(parse_fdinfo("Pid:\t4294967303\n").pidfd_pid, Some(7));
-        assert_eq!(parse_fdinfo("Pid:\t2147483647\n").pidfd_pid, Some(i32::MAX));
+        assert_eq!(fdinfo("Pid:\t4294967303\n", PIDFD).pidfd_pid, Some(7));
+        assert_eq!(
+            fdinfo("Pid:\t2147483647\n", PIDFD).pidfd_pid,
+            Some(i32::MAX)
+        );
         // A line the C skips changes nothing: the pid an earlier line gave
         // stays; one it reads as no pid replaces it.
-        assert_eq!(parse_fdinfo("Pid:\t5\nPid:\t-1\n").pidfd_pid, Some(5));
-        assert_eq!(parse_fdinfo("Pid:\t5\nPid:\tx\n").pidfd_pid, Some(5));
-        assert_eq!(parse_fdinfo("Pid:\t5\nPid:\t-2\n").pidfd_pid, None);
+        assert_eq!(fdinfo("Pid:\t5\nPid:\t-1\n", PIDFD).pidfd_pid, Some(5));
+        assert_eq!(fdinfo("Pid:\t5\nPid:\tx\n", PIDFD).pidfd_pid, Some(5));
+        assert_eq!(fdinfo("Pid:\t5\nPid:\t-2\n", PIDFD).pidfd_pid, None);
         // The same rule for an eventfd's id.
-        assert_eq!(parse_fdinfo("eventfd-id: -1\n").eventfd_id, None);
-        assert_eq!(parse_fdinfo("eventfd-id: 2147483648\n").eventfd_id, None);
-        assert_eq!(parse_fdinfo("eventfd-id: 0\n").eventfd_id, Some(0));
+        assert_eq!(fdinfo("eventfd-id: -1\n", EVENTFD).eventfd_id, None);
+        assert_eq!(fdinfo("eventfd-id: 2147483648\n", EVENTFD).eventfd_id, None);
+        assert_eq!(fdinfo("eventfd-id: 0\n", EVENTFD).eventfd_id, Some(0));
     }
 
     #[test]
@@ -1973,9 +2089,10 @@ mod tests {
                     format!("tfd: {fd:8} events:       19 data: {fd:16x}  pos:0 ino:1 sdev:d\n")
                 })
                 .collect();
-            let info = parse_fdinfo(&format!(
-                "pos:\t0\nflags:\t02\nmnt_id:\t16\nino:\t61\n{text}"
-            ));
+            let info = fdinfo(
+                &format!("pos:\t0\nflags:\t02\nmnt_id:\t16\nino:\t61\n{text}"),
+                EPOLL,
+            );
             name_for_target("anon_inode:[eventpoll]", &info, LinkNode::Anon)
         };
         let list = |n: usize| {
@@ -1996,16 +2113,18 @@ mod tests {
         };
         assert_eq!(watching(33), format!("[eventpoll:{}...]", last32(33)));
         assert_eq!(watching(40), format!("[eventpoll:{}...]", last32(40)));
-        let big = parse_fdinfo(
+        let big = fdinfo(
             &(1..=40)
                 .map(|n| format!("tfd:  {n} events: 1f data: 0\n"))
                 .collect::<String>(),
+            EPOLL,
         );
         assert_eq!(big.tfds.len(), 32, "32 kept");
         // A descriptor number an `int` cannot hold is the C's -1, and sorts
         // first; a `-1`, `ULONG_MAX` to `strtoul()`, is a line skipped.
-        let odd = parse_fdinfo(
+        let odd = fdinfo(
             "tfd: 5 events: 1\ntfd: 4294967295 events: 1\ntfd: 2147483648 events: 1\ntfd: -1 events: 1\n",
+            EPOLL,
         );
         assert_eq!(odd.tfds, [-1, -1, 5]);
     }
@@ -2025,15 +2144,17 @@ mod tests {
         // flags must decode to write-only. Real fdinfo on a real fd — no fixture
         // text — so a format change in the kernel would fail here, not in CI's
         // differential.
-        let dir = std::env::temp_dir().join(format!("lsof_rs_fdinfo_{}", self_pid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testdir::TestDir::new("fdinfo");
         let mut f = std::fs::File::create(dir.join("five")).unwrap();
         f.write_all(b"12345").unwrap();
-        let info = fdinfo_for(&format!("/proc/{}", self_pid()), &f.as_raw_fd().to_string());
+        let info = fdinfo_for(
+            &format!("/proc/{}", self_pid()),
+            &f.as_raw_fd().to_string(),
+            Some(dir.join("five").as_os_str().as_bytes()),
+        );
         assert_eq!(info.access(), AccessMode::Write);
         assert_eq!(info.pos, Some(5), "pos: must track the write position");
         drop(f);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2044,7 +2165,12 @@ mod tests {
         let (reader, _writer) = std::io::pipe().expect("pipe(2)");
         let raw = reader.as_raw_fd();
         let link = format!("/proc/self/fd/{raw}");
-        let info = fdinfo_for(&format!("/proc/{}", self_pid()), &raw.to_string());
+        let target = std::fs::read_link(&link).unwrap();
+        let info = fdinfo_for(
+            &format!("/proc/{}", self_pid()),
+            &raw.to_string(),
+            Some(target.as_os_str().as_bytes()),
+        );
         let f = row_all(
             Path::new(&link),
             FdType::Handle(raw as u64),
@@ -2065,7 +2191,7 @@ mod tests {
     fn fdinfo_text_is_parsed_defensively() {
         // The pure half of fdinfo_for, over text rather than a live fd.
         let ap = |s: &str| {
-            let i = parse_fdinfo(s);
+            let i = fdinfo(s, "/x");
             (i.access(), i.pos)
         };
         assert_eq!(
@@ -2099,9 +2225,9 @@ mod tests {
         assert_eq!(ap("pos:\t1\npos:\t-1\n").1, Some(1));
         assert_eq!(ap("flags:\t02\nflags:\tx\n").0, AccessMode::ReadWrite);
         // The anon-inode identities degrade the same way.
-        assert_eq!(parse_fdinfo("eventfd-id: nope\n").eventfd_id, None);
+        assert_eq!(fdinfo("eventfd-id: nope\n", EVENTFD).eventfd_id, None);
         assert_eq!(
-            parse_fdinfo("tfd: nope events: 1\n").tfds,
+            fdinfo("tfd: nope events: 1\n", EPOLL).tfds,
             Vec::<i32>::new()
         );
     }
@@ -2115,7 +2241,7 @@ mod tests {
         // `0xffffffffff600000`, `-F o` the same, JSON
         // `"offset":"18446744073699065856"`. lsof-rs had read no position
         // at all, and printed none.
-        let pos = |s: &str| parse_fdinfo(&format!("pos:\t{s}\nflags:\t0100000\n")).pos;
+        let pos = |s: &str| fdinfo(&format!("pos:\t{s}\nflags:\t0100000\n"), "/x").pos;
         assert_eq!(pos("-10485760"), Some(0xffff_ffff_ff60_0000));
         assert_eq!(pos("-10485760"), Some(18_446_744_073_699_065_856));
         assert_eq!(pos("-140737488355327"), Some(0xffff_8000_0000_0001));
@@ -2180,7 +2306,7 @@ mod tests {
         assert_eq!(c_int(u64::MAX - 1), -1);
         // `flags:` in base 0, kept as the C's `unsigned int`: what the
         // kernel writes is octal by its leading 0.
-        let flags = |s: &str| parse_fdinfo(&format!("flags:\t{s}\n")).flags;
+        let flags = |s: &str| fdinfo(&format!("flags:\t{s}\n"), "/x").flags;
         assert_eq!(flags("0100002"), Some(0o100002));
         assert_eq!(flags("02"), Some(2));
         assert_eq!(flags("0x8002"), Some(0x8002));
@@ -2191,7 +2317,7 @@ mod tests {
         // A line is its fields, cut at blanks and tabs (`get_fields()`): the
         // first must be the name whole, the second is the number, and what
         // follows it is not read.
-        let p = |s: &str| parse_fdinfo(s).pos;
+        let p = |s: &str| fdinfo(s, "/x").pos;
         assert_eq!(p("pos:\t5\n"), Some(5));
         assert_eq!(p("  pos: \t 5 6\n"), Some(5));
         assert_eq!(p("pos:5\n"), None, "one field, `pos:5`");
@@ -2200,7 +2326,156 @@ mod tests {
         assert_eq!(p("pos:\n"), None);
         // '\n' ends a line; a '\r' before it is the number's, and no digit.
         assert_eq!(p("pos:\t5\r\nflags:\t02\n"), None);
-        assert_eq!(parse_fdinfo("pos:\t5\r\nflags:\t02\n").flags, Some(2));
+        assert_eq!(fdinfo("pos:\t5\r\nflags:\t02\n", "/x").flags, Some(2));
+    }
+
+    #[test]
+    fn fdinfo_is_asked_for_what_the_link_names() {
+        // `fdinfo_mask` (`dproc.c:1229-1253`): flags, pos and tty-index for
+        // every descriptor; the rest by what follows the link's colon.
+        use want::*;
+        let w = |l: &str| fdinfo_wants(Some(l.as_bytes()));
+        let every = BASE | TTY_INDEX;
+        assert_eq!(fdinfo_wants(None), every, "a link that would not read");
+        assert_eq!(w("/dev/ptmx"), every);
+        assert_eq!(w("/tmp/a:[pidfd]"), every, "a path has no rest");
+        assert_eq!(w("[pidfd]"), every, "no colon, no rest");
+        assert_eq!(w("anon_inode:[eventfd]"), every | EVENTFD_ID);
+        assert_eq!(w("anon_inode:[eventfoo"), every | EVENTFD_ID, "`[eventf`");
+        assert_eq!(w("anon_inode:[eventpoll]"), every | TFD);
+        assert_eq!(w("anon_inode:[eventp"), every | TFD, "`[eventp`");
+        assert_eq!(w("anon_inode:[event]"), every);
+        assert_eq!(w("anon_inode:[event"), every);
+        assert_eq!(w("anon_inode:eventfd"), every);
+        assert_eq!(w("anon_inode:[pidfd]"), every | PID);
+        assert_eq!(w("anon_inode:[perf_event]"), every | PID, "`[p`");
+        assert_eq!(w("anon_inode:[p"), every | PID);
+        assert_eq!(w("anon_inode:[timerfd]"), every);
+        assert_eq!(w("anon_inode:p"), every);
+        // Linux 6.9's pidfd, by its source, with anything after the colon.
+        assert_eq!(w("pidfd:[42]"), every | PID);
+        assert_eq!(w("pidfd:x"), every | PID);
+        assert_eq!(w("pidfd:"), every);
+        assert_eq!(w("pidfdx:[42]"), every);
+        assert_eq!(w("pipe:[42]"), every);
+        assert_eq!(w("socket:[42]"), every);
+        assert_eq!(w("net:[4026531833]"), every);
+    }
+
+    #[test]
+    fn fdinfo_lines_the_link_does_not_ask_for_are_not_read() {
+        // A line of another kind's: no eventfd id in a pidfd's fdinfo, no
+        // pid in an eventfd's, no watched descriptor in either, no pid or id
+        // in a file's.
+        let pidfd = "pos:\t0\nflags:\t02\nPid:\t7\neventfd-id: 9\ntfd: 4 events: 1\n";
+        let i = fdinfo(pidfd, PIDFD);
+        assert_eq!(
+            (i.pidfd_pid, i.eventfd_id, i.tfds.len()),
+            (Some(7), None, 0)
+        );
+        let i = fdinfo(pidfd, EVENTFD);
+        assert_eq!(
+            (i.pidfd_pid, i.eventfd_id, i.tfds.len()),
+            (None, Some(9), 0)
+        );
+        let i = fdinfo(pidfd, EPOLL);
+        assert_eq!((i.pidfd_pid, i.eventfd_id, i.tfds.len()), (None, None, 1));
+        let i = fdinfo(pidfd, "/tmp/f");
+        assert_eq!((i.pidfd_pid, i.eventfd_id, i.tfds.len()), (None, None, 0));
+        assert_eq!((i.pos, i.flags), (Some(0), Some(2)));
+        // `[perf_event]` is asked for a pid too (`rest[1] == 'p'`); one its
+        // fdinfo never has.
+        assert_eq!(
+            fdinfo("Pid:\t5\n", "anon_inode:[perf_event]").pidfd_pid,
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn fdinfo_is_read_until_every_line_asked_for_is_found() {
+        // `if ((rv |= …) == msk) break;` (`dproc.c:494-506, 563-573`). A
+        // pseudoterminal master's fdinfo ends in `tty-index:`, the last line
+        // it is asked for; what follows it is not read. Measured on a forged
+        // fdinfo, bind-mounted: the C keeps `0t0` and `u` where lsof-rs had
+        // read the later `0t9` and `r`.
+        let i = fdinfo(
+            "pos:\t0\nflags:\t0102002\nmnt_id:\t25\nino:\t2\ntty-index:\t3\nflags:\t00\npos:\t9\n",
+            "/dev/ptmx",
+        );
+        assert_eq!(
+            (i.pos, i.flags, i.tty_index),
+            (Some(0), Some(0o102002), Some(3))
+        );
+        // Found first, the later `tty-index:` is not read: measured, the C
+        // then finds no `/dev/pts/7` to make the end of.
+        let i = fdinfo(
+            "tty-index:\t7\npos:\t0\nflags:\t02\nmnt_id:\t25\ntty-index:\t3\n",
+            "/dev/ptmx",
+        );
+        assert_eq!(i.tty_index, Some(7));
+        // A line the C refuses is not found, and the read goes on.
+        let i = fdinfo("pos:\t0\nflags:\t02\ntty-index:\tx\npos:\t4\n", "/dev/ptmx");
+        assert_eq!((i.pos, i.tty_index), (Some(4), None));
+        // A file's fdinfo has no `tty-index:`: every line is read, and a
+        // later one wins.
+        assert_eq!(fdinfo("pos:\t1\nflags:\t02\npos:\t2\n", "/f").pos, Some(2));
+        // A pidfd's has no `tty-index:` either.
+        assert_eq!(
+            fdinfo("Pid:\t5\npos:\t0\nflags:\t02\nPid:\t6\n", PIDFD).pidfd_pid,
+            Some(6)
+        );
+        // With every line it is asked for, it stops after the last.
+        assert_eq!(
+            fdinfo(
+                "tty-index:\t1\nPid:\t5\npos:\t0\nflags:\t02\nPid:\t6\n",
+                PIDFD
+            )
+            .pidfd_pid,
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn an_eventpolls_fdinfo_ends_at_the_first_line_after_its_tfds() {
+        // "we can assume tfd lines are continuous": a line asked for that is
+        // not a `tfd:`, once one has been read, is read and ends the read
+        // (`dproc.c:563-573`). `flags:` and `pos:` do not end it.
+        let tfds = "pos:\t0\nflags:\t02\ntfd: 5 events: 1\n";
+        let i = fdinfo(
+            &format!("{tfds}tty-index:\t4\npos:\t9\ntfd: 6 events: 1\n"),
+            EPOLL,
+        );
+        assert_eq!(
+            (i.pos, i.tty_index, i.tfds.clone()),
+            (Some(0), Some(4), vec![5])
+        );
+        let i = fdinfo(&format!("{tfds}pos:\t9\ntfd: 6 events: 1\n"), EPOLL);
+        assert_eq!((i.pos, i.tfds.clone()), (Some(9), vec![5, 6]));
+        // Whether or not that line completes what was asked for: here no
+        // `pos:` or `flags:` came first, and the read still ends.
+        let i = fdinfo(
+            "tfd: 5 events: 1\ntty-index:\t4\npos:\t9\ntfd: 6 events: 1\n",
+            EPOLL,
+        );
+        assert_eq!(
+            (i.pos, i.tty_index, i.tfds.clone()),
+            (None, Some(4), vec![5])
+        );
+        // A refused `tty-index:` is no line found.
+        let i = fdinfo(&format!("{tfds}tty-index:\tx\ntfd: 6 events: 1\n"), EPOLL);
+        assert_eq!(i.tfds, [5, 6]);
+        // A `tfd:` ends it only when every line asked for is in and the 32
+        // are kept: a `tty-index:` before 32 `tfd:`s.
+        let many: String = (1..=40).map(|n| format!("tfd: {n} events: 1\n")).collect();
+        let i = fdinfo(
+            &format!("tty-index:\t1\npos:\t0\nflags:\t02\n{many}pos:\t9\n"),
+            EPOLL,
+        );
+        assert_eq!((i.pos, i.tfds.len()), (Some(0), 32));
+        assert_eq!(i.tfds.last(), Some(&32), "the first 32 the file lists");
+        // Without one, all 40 are read (32 kept) and the `pos:` after them.
+        let i = fdinfo(&format!("pos:\t0\nflags:\t02\n{many}pos:\t9\n"), EPOLL);
+        assert_eq!((i.pos, i.tfds.len()), (Some(9), 32));
     }
     #[test]
     fn an_exempt_match_is_a_plain_prefix_and_never_a_socket() {
@@ -2266,15 +2541,13 @@ mod tests {
     /// missing entry fails (`ENOENT`), and a link to nowhere reads but will
     /// not `stat`. The differential covers the real thing — a process made
     /// unreadable with `PR_SET_DUMPABLE` — on the paths a host can reach.
-    fn fake_proc(tag: &str) -> std::path::PathBuf {
-        // The canonical temp directory: the `-e` tests compare a walk through
-        // the kernel's spelling with a prefix, and a symlinked TMPDIR (macOS)
-        // made the two differ.
-        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let dir = tmp.join(format!("lsof_rs_unreadable_{tag}_{}", self_pid()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    ///
+    /// A fresh private directory ([`crate::testdir::TestDir`]), under the
+    /// canonical temp directory: the `-e` tests compare a walk through the
+    /// kernel's spelling with a prefix, and a symlinked TMPDIR (macOS) made
+    /// the two differ. Removed when dropped.
+    fn fake_proc(tag: &str) -> crate::testdir::TestDir {
+        crate::testdir::TestDir::new(&format!("unreadable-{tag}"))
     }
 
     fn walk(
@@ -2360,7 +2633,6 @@ mod tests {
         }
         // `-F` writes no `t` for the NOFD row, and a `t` for the others.
         assert!(!rows[3].file_type.has_code() && rows[0].file_type.has_code());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2392,7 +2664,6 @@ mod tests {
             txt(Some(0)),
             format!("{base}/exe (readlink: {})", why(EINVAL))
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2416,7 +2687,34 @@ mod tests {
             rows.iter().all(|f| f.fd != FdType::NoFd),
             "the directory opened"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_walk_reads_fdinfo_for_what_the_link_names() {
+        // The link is read before fdinfo, as the C reads it, since which
+        // lines are read depends on it (`dproc.c:1229-1253`): Linux 6.9's
+        // `pidfd:[N]` is asked for its `Pid:`, a path is not. Here each link
+        // is relative, to a regular file of that name beside it.
+        let dir = fake_proc("wants");
+        let fd = dir.join("fd");
+        std::fs::create_dir(&fd).unwrap();
+        std::fs::create_dir(dir.join("fdinfo")).unwrap();
+        std::fs::write(fd.join("pidfd:[42]"), b"x").unwrap();
+        std::fs::write(fd.join("plain"), b"x").unwrap();
+        std::os::unix::fs::symlink("pidfd:[42]", fd.join("3")).unwrap();
+        std::os::unix::fs::symlink("plain", fd.join("4")).unwrap();
+        for n in ["3", "4"] {
+            std::fs::write(
+                dir.join("fdinfo").join(n),
+                b"pos:\t7\nflags:\t02\nmnt_id:\t1\nPid:\t77\n",
+            )
+            .unwrap();
+        }
+        let rows = walk(&dir, Some(0), false, false);
+        let at = |n: u64| rows.iter().find(|f| f.fd == FdType::Handle(n)).unwrap();
+        assert_eq!(at(3).name, "[pidfd:77]", "{rows:?}");
+        assert_eq!(at(3).offset, Some(7));
+        assert_eq!(at(4).name, "plain");
     }
 
     #[test]
@@ -2457,7 +2755,6 @@ mod tests {
             .find(|f| f.fd == FdType::Handle(4))
             .expect("fd 4");
         assert_eq!(fd4.access, AccessMode::ReadWrite);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2537,7 +2834,7 @@ mod tests {
             nfs_mounts: &[],
             unix_stage: None,
         };
-        let info = parse_fdinfo("pos:\t0\nflags:\t02\neventfd-id: 6\n");
+        let info = fdinfo("pos:\t0\nflags:\t02\neventfd-id: 6\n", EVENTFD);
         // A FIFO behind the link text of an eventfd: typed by its `stat`.
         let f = row(
             &link,
@@ -2583,7 +2880,7 @@ mod tests {
         assert_eq!(f.name, format!("anon_inode (stat: {})", why(ENOENT)));
         // And Linux 6.9's pidfd, a regular file: named by its pid, on a
         // numbered descriptor alone.
-        let pid = parse_fdinfo("pos:\t0\nflags:\t02\nPid:\t77\n");
+        let pid = fdinfo("pos:\t0\nflags:\t02\nPid:\t77\n", "pidfd:[42]");
         let f = row(&file, "pidfd:[42]".into(), FdType::Handle(3), &pid, &ctx).unwrap();
         assert_eq!(
             (f.file_type.clone(), f.name.as_str()),
@@ -2600,7 +2897,6 @@ mod tests {
         );
         let f = row(&file, "pidfd:[42]".into(), FdType::Cwd, &pid, &ctx).unwrap();
         assert_eq!(f.name, "pidfd", "the C asks a cwd's link for no rest");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2727,7 +3023,6 @@ mod tests {
             .find(|f| f.fd == FdType::Cwd)
             .expect("still a row");
         assert_eq!(quiet.name, "/nonexistent/lsof-rs");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2763,7 +3058,6 @@ mod tests {
             .find(|f| f.fd == FdType::Cwd)
             .expect("a cwd row");
         assert_eq!(cwd.links, Some(1), "anything else keeps its count: {cwd:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2794,7 +3088,6 @@ mod tests {
             "its cells are the socket file's"
         );
         assert_eq!((s.file_id(), s.searched_fs_device()), (None, None), "{s:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2949,7 +3242,6 @@ mod tests {
         )
         .expect("a row");
         assert_eq!(f.file_type, FileType::Regular);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2973,7 +3265,6 @@ mod tests {
         assert_eq!(at(0).file_type, FileType::Chr);
         assert_eq!(at(0).rdev.map(|r| r.get()), Some(0x103));
         assert_eq!(at(3).rdev, None, "a regular file names no device");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3043,7 +3334,6 @@ mod tests {
             assert_eq!(socket_file_id(s, None, &elsewhere, None), id, "{s}");
             assert_eq!(socket_file_id(s, None, &exempt, None), None, "{s} under -e");
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3101,7 +3391,6 @@ mod tests {
             assert!(metadata_outside(p.as_bytes(), &ex, None).is_none(), "{p}");
         }
         assert!(metadata_outside(b"/", &minus(&["/"]), None).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3151,7 +3440,6 @@ mod tests {
         let second = row(&link, target, FdType::Handle(4), &FdInfo::default(), &ctx);
         assert_eq!(second.and_then(id), Some(file_id(&md)));
         drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3190,7 +3478,6 @@ mod tests {
             "the control: the full walk has the specials and both fds"
         );
         assert!(walk(&dir, Some(1000), true, true).is_empty(), "-w as well");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3206,7 +3493,6 @@ mod tests {
         assert!(!has_readable_file(&base), "links that will not read");
         std::os::unix::fs::symlink("/dev/null", dir.join("fd").join("1")).unwrap();
         assert!(has_readable_file(&base), "one fd that reads is enough");
-        let _ = std::fs::remove_dir_all(&dir);
         // And a live process that can be read, itself.
         assert!(has_readable_file(&format!("/proc/{}", self_pid())));
     }
@@ -3588,7 +3874,6 @@ mod tests {
         );
         assert!(said.borrow().is_empty());
         drop(held);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// With an NFS mount listed and every call answering, a row is the row
@@ -3640,7 +3925,6 @@ mod tests {
         );
         assert_eq!((f.fs_device, f.node.as_deref()), (Some(7), Some("9")));
         drop(held);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `-U`/`-i` with an NFS mount listed: every fd's two calls are made,

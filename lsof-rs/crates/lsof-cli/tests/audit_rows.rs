@@ -112,6 +112,36 @@ fn lsof_finds_itself_on_the_proc_file_system() {
     assert_eq!(out, format!("{pid}\n"), "{err}");
 }
 
+/// A new directory for one test's files, `lsof-rs-<tag>-<pid>-<n>` in the
+/// target's own temp directory, not the shared one: made by `mkdir` with
+/// mode 0700, which fails on anything already there, then checked to be a
+/// directory owned by this process's effective uid. The script it holds is
+/// run, so no one else may have made or be able to change it.
+fn fresh_dir(tag: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let euid: u32 = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|v| v.split_whitespace().nth(1))
+        .and_then(|v| v.parse().ok())
+        .expect("an effective uid");
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    for n in 0..64 {
+        let dir = base.join(format!("lsof-rs-{tag}-{}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                let md = std::fs::symlink_metadata(&dir).unwrap();
+                assert!(md.is_dir() && md.uid() == euid && md.mode() & 0o077 == 0);
+                return dir;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("mkdir {}: {e}", dir.display()),
+        }
+    }
+    panic!("no fresh directory under {}", base.display());
+}
+
 /// Holds a ping socket bound to 127.0.0.1 with id 4242 at descriptor 20,
 /// which the kernel lists in `/proc/net/icmp`, and one never used at 21,
 /// which is in no table.
@@ -148,25 +178,23 @@ fn beside_ping_sockets(runs: &[&[&str]]) -> Option<Vec<(String, String)>> {
         eprintln!("skipped: no python3 to hold the sockets");
         return None;
     }
-    let dir = std::env::temp_dir().join(format!("lsof-rs-ping-it-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = fresh_dir("ping");
     std::fs::write(dir.join("holder.py"), PING_HOLDER).unwrap();
     // 7: the holder went away before it was ready, which is a namespace
     // that will not have ping sockets (`/proc/sys` read-only, or a kernel
     // built without them).
     let mut script = String::from(
         "set -e\ncd \"$1\"\npython3 holder.py ready 2> holder.err & H=$!\n\
+         trap 'kill $H 2>/dev/null' EXIT\n\
          i=0; while [ ! -e ready ]; do i=$((i+1)); [ $i -lt 400 ] || exit 3; \
          kill -0 $H 2>/dev/null || exit 7; sleep 0.05; done\n",
     );
     for (i, argv) in runs.iter().enumerate() {
         script.push_str(&format!(
-            "\"$2\" -n -P {} -F ftn -a -p $H -d 20,21 > out{i} 2> err{i} || true\n",
+            "timeout 30 \"$2\" -n -P {} -F ftn -a -p $H -d 20,21 > out{i} 2> err{i} || true\n",
             argv.join(" ")
         ));
     }
-    script.push_str("kill $H\n");
     let status = Command::new("unshare")
         .args([
             "--user",
